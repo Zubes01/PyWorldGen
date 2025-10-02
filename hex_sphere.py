@@ -5,6 +5,7 @@ from math import sqrt
 from collections import defaultdict
 import opensimplex
 import random
+import heapq
 
 class SimulatedGlobe:
     # Creates a sphere tiled with hexagons (and 12 pentagons) for world generation
@@ -237,6 +238,42 @@ class SimulatedGlobe:
         for neighbor in random_hex.neighbors:
             neighbor.color = (1, 0, 0)  # Red
 
+    def plot_equirectangular(self):
+        # Simple equirectangular projection for testing
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for hexagon in self.world_hexagons:
+            # Convert 3D vertices to 2D (longitude, latitude)
+            lon_lat = []
+            for v in hexagon.vertices:
+                x, y, z = v
+                lon = np.arctan2(y, x)
+                lat = np.arcsin(z / np.linalg.norm(v))
+                lon_lat.append((lon, lat))
+
+            # Unwrap longitudes to avoid stretching across the map edge
+            lons = np.array([ll[0] for ll in lon_lat])
+            lats = np.array([ll[1] for ll in lon_lat])
+            # Find jumps in longitude
+            lon_diffs = np.diff(lons)
+            if np.any(np.abs(lon_diffs) > np.pi):
+                # If a jump > pi is found, unwrap longitudes
+                lons_unwrapped = lons.copy()
+                for i in range(1, len(lons_unwrapped)):
+                    diff = lons_unwrapped[i] - lons_unwrapped[i-1]
+                    if diff > np.pi:
+                        lons_unwrapped[i:] -= 2 * np.pi
+                    elif diff < -np.pi:
+                        lons_unwrapped[i:] += 2 * np.pi
+                lon_lat = list(zip(lons_unwrapped, lats))
+
+            polygon = plt.Polygon(lon_lat, edgecolor='black', alpha=0.5, facecolor=hexagon.color)
+            ax.add_patch(polygon)
+
+        ax.set_xlim(-np.pi - 0.3, np.pi + 0.3) # Add some padding for longitudes that were unwrapped
+        ax.set_ylim(-np.pi/2, np.pi/2)
+        ax.set_aspect('equal')
+        plt.show()
+
     def plot_sphere(self):
         """
         Visualize the hexagon-tiled sphere.
@@ -263,6 +300,105 @@ class SimulatedGlobe:
         
         plt.tight_layout()
         plt.show()
+            
+    def plot_flattened(self):
+        """
+        Plot a flattened view of the hexagonal tiled sphere using a 2D hexagonal grid.
+        Note that pentagons will appear as hexagons in this projection with distortion.
+
+        The general behavior of this algorithm is as follows:
+        1. Pick a random hexagon to start with.
+        2. Add all of its neighbors to a queue, marking them as visited when added.
+        3. While the queue is not empty:
+            a. Dequeue a hexagon.
+            b. Place it as a hexagon with a fixed radius in the 2D plane, adjacent to the hexagon that added it to the queue.
+            c. Add all of its unvisited neighbors to the queue, marking them as visited when added.
+        4. Continue until all hexagons have been placed.
+        """
+        outer_radius = 1  # Fixed radius for hexagons in the 2D plane. Note this is the outer radius (distance from center to vertex)
+        horizontal_spacing = outer_radius * sqrt(3)  # Horizontal distance between hexagon centers
+        vertical_spacing = outer_radius * 3 / 2  # Vertical distance between hexagon centers
+
+        # Directions to move in the hex grid (pointy-topped)
+        directions = [
+            (horizontal_spacing, 0),  # Right
+            (horizontal_spacing / 2, vertical_spacing),  # Up-Right
+            (-horizontal_spacing / 2, vertical_spacing),  # Up-Left
+            (-horizontal_spacing, 0),  # Left
+            (-horizontal_spacing / 2, -vertical_spacing),  # Down-Left
+            (horizontal_spacing / 2, -vertical_spacing)   # Down-Right
+        ]
+
+        # for testing purposes right now, just set a number of hexagons to plot
+        fig, ax = plt.subplots(figsize=(10, 10))
+        placed_hexagons = set()
+        hexagons_to_place = []
+        num_hexagons_to_plot = 1000
+        placed_hexagons.add((0, 0))
+        heapq.heappush(hexagons_to_place, (0, (0, 0)))  # Start with the first hexagon
+        for i in range(num_hexagons_to_plot):
+            current_hex = heapq.heappop(hexagons_to_place)[1]
+
+            # add the neighbors to the set of hexagons to place
+            for x_d, y_d in directions:
+                distance_to_center = sqrt((current_hex[0] + x_d) ** 2 + (current_hex[1] + y_d) ** 2)
+                coordiante_tuple = (current_hex[0] + x_d, current_hex[1] + y_d)
+                not_occupied = True
+                for placed_hex in placed_hexagons:
+                    # if the new coordinate is too close to an already placed hexagon, skip it
+                    if sqrt((placed_hex[0] - coordiante_tuple[0]) ** 2 + (placed_hex[1] - coordiante_tuple[1]) ** 2) < outer_radius * 0.9:
+                        not_occupied = False
+                        break
+                if not_occupied:
+                    heapq.heappush(hexagons_to_place, (distance_to_center, coordiante_tuple))
+                    placed_hexagons.add(coordiante_tuple)
+            
+            # now plot the current hexagon
+            # the center point is current_hex
+            center_x, center_y = current_hex
+            top_vertex = (center_x, center_y + outer_radius)
+            upper_right_vertex = (center_x + horizontal_spacing / 2, center_y + outer_radius / 2)
+            lower_right_vertex = (center_x + horizontal_spacing / 2, center_y - outer_radius / 2)
+            bottom_vertex = (center_x, center_y - outer_radius)
+            lower_left_vertex = (center_x - horizontal_spacing / 2, center_y - outer_radius / 2)
+            upper_left_vertex = (center_x - horizontal_spacing / 2, center_y + outer_radius / 2)
+            hexagon_vertices = [top_vertex, upper_right_vertex, lower_right_vertex, bottom_vertex, lower_left_vertex, upper_left_vertex]
+            hexagon_polygon = plt.Polygon(hexagon_vertices, edgecolor='black', alpha=0.5, facecolor=(0.5, 0.5, 0.5))
+            ax.add_patch(hexagon_polygon)
+        
+        ax.set_aspect('equal')
+        # Set limits and grid
+        all_x = [pos[0] for pos in placed_hexagons]
+        all_y = [pos[1] for pos in placed_hexagons]
+        ax.set_xlim(min(all_x) - outer_radius, max(all_x) + outer_radius)
+        ax.set_ylim(min(all_y) - outer_radius, max(all_y) + outer_radius)
+        plt.grid()
+        plt.show()
+
+    def print_geometry_statistics(self):
+        """
+        Print statistics about the hexagonal grid.
+        """
+        num_hexagons = len(self.world_hexagons)
+        num_pentagons = sum(1 for h in self.world_hexagons if len(h.vertices) == 5)
+        num_hexagons_only = num_hexagons - num_pentagons
+
+        max_x_coord_for_center_of_hexagon = max(h.center[0] for h in self.world_hexagons)
+        min_x_coord_for_center_of_hexagon = min(h.center[0] for h in self.world_hexagons)
+        max_y_coord_for_center_of_hexagon = max(h.center[1] for h in self.world_hexagons)
+        min_y_coord_for_center_of_hexagon = min(h.center[1] for h in self.world_hexagons)
+        max_z_coord_for_center_of_hexagon = max(h.center[2] for h in self.world_hexagons)
+        min_z_coord_for_center_of_hexagon = min(h.center[2] for h in self.world_hexagons)
+        
+        print(f"Total hexagons (including pentagons): {num_hexagons}")
+        print(f"Number of pentagons: {num_pentagons}")
+        print(f"Number of hexagons: {num_hexagons_only}")
+        print(f"Max X coord for center of hexagon: {max_x_coord_for_center_of_hexagon}")
+        print(f"Min X coord for center of hexagon: {min_x_coord_for_center_of_hexagon}")
+        print(f"Max Y coord for center of hexagon: {max_y_coord_for_center_of_hexagon}")
+        print(f"Min Y coord for center of hexagon: {min_y_coord_for_center_of_hexagon}")
+        print(f"Max Z coord for center of hexagon: {max_z_coord_for_center_of_hexagon}")
+        print(f"Min Z coord for center of hexagon: {min_z_coord_for_center_of_hexagon}")
 
 class WorldHexagon:
     def __init__(self, center, vertices):
@@ -273,12 +409,15 @@ class WorldHexagon:
         self.neighbors = []  # List of neighboring WorldHexagons
 
 def main():
-    globe = SimulatedGlobe(recursion_level=4)
+    globe = SimulatedGlobe(recursion_level=1)
     globe.map_perlin_noise()
     globe.assign_perlin_terrain_colors()
     globe.populate_neighbor_lists()
-    globe.paint_random_and_neighbors_red()  # For testing neighbor functionality
-    globe.plot_sphere()
+    #globe.paint_random_and_neighbors_red()  # For testing neighbor functionality
+    globe.print_geometry_statistics()
+    #globe.plot_sphere()
+    #globe.plot_equirectangular()
+    globe.plot_flattened()
 
 if __name__ == '__main__':
     main()
