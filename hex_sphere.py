@@ -5,7 +5,9 @@ from math import sqrt
 from collections import defaultdict
 import opensimplex
 import random
-import heapq
+import time
+import pickle
+import os
 
 class SimulatedGlobe:
     # Creates a sphere tiled with hexagons (and 12 pentagons) for world generation
@@ -23,6 +25,7 @@ class SimulatedGlobe:
         """
         Create WorldHexagon objects for each hex/pentagon on the sphere.
         """
+
         def create_icosphere():
             """
             Creates a geodesic sphere from an icosahedron.
@@ -162,11 +165,28 @@ class SimulatedGlobe:
             
             return hex_faces, face_centroids
 
+        # Create the cache directory if it doesn't exist
+        os.makedirs('./.cache', exist_ok=True)
+
+        # Check if cached hexagons exist
+        try:
+            with open(f'./.cache/world_hexagons_{self.recursion_level}.pkl', 'rb') as f:
+                self.world_hexagons = pickle.load(f)
+                print("\tLoaded cached world hexagons.")
+                return
+        except FileNotFoundError:
+            print("\tNo cached world hexagons found, generating new ones.")
+
         vertices, faces = create_icosphere()
         hex_faces, face_centroids = icosphere_to_hexsphere(vertices, faces)
         for hf in hex_faces:
             poly_verts = face_centroids[hf]
             self.world_hexagons.append(WorldHexagon(np.mean(poly_verts, axis=0), poly_verts))
+
+        # Save the world hexagons to a file for faster loading next time
+        with open(f'./.cache/world_hexagons_{self.recursion_level}.pkl', 'wb') as f:
+            pickle.dump(self.world_hexagons, f)
+
 
     def map_perlin_noise(self, scale=3):
         """
@@ -266,7 +286,7 @@ class SimulatedGlobe:
                         lons_unwrapped[i:] += 2 * np.pi
                 lon_lat = list(zip(lons_unwrapped, lats))
 
-            polygon = plt.Polygon(lon_lat, edgecolor='black', alpha=0.5, facecolor=hexagon.color)
+            polygon = plt.Polygon(lon_lat, edgecolor=None, alpha=0.5, facecolor=hexagon.color)
             ax.add_patch(polygon)
 
         ax.set_xlim(-np.pi - 0.3, np.pi + 0.3) # Add some padding for longitudes that were unwrapped
@@ -299,80 +319,6 @@ class SimulatedGlobe:
         ax.set_box_aspect([1, 1, 1])
         
         plt.tight_layout()
-        plt.show()
-            
-    def plot_flattened(self):
-        """
-        Plot a flattened view of the hexagonal tiled sphere using a 2D hexagonal grid.
-        Note that pentagons will appear as hexagons in this projection with distortion.
-
-        The general behavior of this algorithm is as follows:
-        1. Pick a random hexagon to start with.
-        2. Add all of its neighbors to a queue, marking them as visited when added.
-        3. While the queue is not empty:
-            a. Dequeue a hexagon.
-            b. Place it as a hexagon with a fixed radius in the 2D plane, adjacent to the hexagon that added it to the queue.
-            c. Add all of its unvisited neighbors to the queue, marking them as visited when added.
-        4. Continue until all hexagons have been placed.
-        """
-        outer_radius = 1  # Fixed radius for hexagons in the 2D plane. Note this is the outer radius (distance from center to vertex)
-        horizontal_spacing = outer_radius * sqrt(3)  # Horizontal distance between hexagon centers
-        vertical_spacing = outer_radius * 3 / 2  # Vertical distance between hexagon centers
-
-        # Directions to move in the hex grid (pointy-topped)
-        directions = [
-            (horizontal_spacing, 0),  # Right
-            (horizontal_spacing / 2, vertical_spacing),  # Up-Right
-            (-horizontal_spacing / 2, vertical_spacing),  # Up-Left
-            (-horizontal_spacing, 0),  # Left
-            (-horizontal_spacing / 2, -vertical_spacing),  # Down-Left
-            (horizontal_spacing / 2, -vertical_spacing)   # Down-Right
-        ]
-
-        # for testing purposes right now, just set a number of hexagons to plot
-        fig, ax = plt.subplots(figsize=(10, 10))
-        placed_hexagons = set()
-        hexagons_to_place = []
-        num_hexagons_to_plot = 1000
-        placed_hexagons.add((0, 0))
-        heapq.heappush(hexagons_to_place, (0, (0, 0)))  # Start with the first hexagon
-        for i in range(num_hexagons_to_plot):
-            current_hex = heapq.heappop(hexagons_to_place)[1]
-
-            # add the neighbors to the set of hexagons to place
-            for x_d, y_d in directions:
-                distance_to_center = sqrt((current_hex[0] + x_d) ** 2 + (current_hex[1] + y_d) ** 2)
-                coordiante_tuple = (current_hex[0] + x_d, current_hex[1] + y_d)
-                not_occupied = True
-                for placed_hex in placed_hexagons:
-                    # if the new coordinate is too close to an already placed hexagon, skip it
-                    if sqrt((placed_hex[0] - coordiante_tuple[0]) ** 2 + (placed_hex[1] - coordiante_tuple[1]) ** 2) < outer_radius * 0.9:
-                        not_occupied = False
-                        break
-                if not_occupied:
-                    heapq.heappush(hexagons_to_place, (distance_to_center, coordiante_tuple))
-                    placed_hexagons.add(coordiante_tuple)
-            
-            # now plot the current hexagon
-            # the center point is current_hex
-            center_x, center_y = current_hex
-            top_vertex = (center_x, center_y + outer_radius)
-            upper_right_vertex = (center_x + horizontal_spacing / 2, center_y + outer_radius / 2)
-            lower_right_vertex = (center_x + horizontal_spacing / 2, center_y - outer_radius / 2)
-            bottom_vertex = (center_x, center_y - outer_radius)
-            lower_left_vertex = (center_x - horizontal_spacing / 2, center_y - outer_radius / 2)
-            upper_left_vertex = (center_x - horizontal_spacing / 2, center_y + outer_radius / 2)
-            hexagon_vertices = [top_vertex, upper_right_vertex, lower_right_vertex, bottom_vertex, lower_left_vertex, upper_left_vertex]
-            hexagon_polygon = plt.Polygon(hexagon_vertices, edgecolor='black', alpha=0.5, facecolor=(0.5, 0.5, 0.5))
-            ax.add_patch(hexagon_polygon)
-        
-        ax.set_aspect('equal')
-        # Set limits and grid
-        all_x = [pos[0] for pos in placed_hexagons]
-        all_y = [pos[1] for pos in placed_hexagons]
-        ax.set_xlim(min(all_x) - outer_radius, max(all_x) + outer_radius)
-        ax.set_ylim(min(all_y) - outer_radius, max(all_y) + outer_radius)
-        plt.grid()
         plt.show()
 
     def print_geometry_statistics(self):
@@ -409,15 +355,52 @@ class WorldHexagon:
         self.neighbors = []  # List of neighboring WorldHexagons
 
 def main():
-    globe = SimulatedGlobe(recursion_level=1)
+    print("Creating simulated globe...")
+    start_time = time.time()
+    globe = SimulatedGlobe(recursion_level=6)
+    end_time = time.time()
+    print(f"Globe creation took {end_time - start_time:.2f} seconds.")
+
+    print("Mapping perlin noise...")
+    start_time = time.time()
     globe.map_perlin_noise()
+    end_time = time.time()
+    print(f"Perlin noise mapping took {end_time - start_time:.2f} seconds.")
+
+    print("Assigning terrain colors...")
+    start_time = time.time()
     globe.assign_perlin_terrain_colors()
+    end_time = time.time()
+    print(f"Terrain color assignment took {end_time - start_time:.2f} seconds.")
+
+    print("Populating neighbor lists...")
+    start_time = time.time()
     globe.populate_neighbor_lists()
-    #globe.paint_random_and_neighbors_red()  # For testing neighbor functionality
+    end_time = time.time()
+    print(f"Neighbor list population took {end_time - start_time:.2f} seconds.")
+
+    print("Painting a random hexagon and its neighbors red...")
+    start_time = time.time()
+    globe.paint_random_and_neighbors_red()  # For testing neighbor functionality
+    end_time = time.time()
+    print(f"Painting took {end_time - start_time:.2f} seconds.")
+
+    print("Printing geometry statistics...")
+    start_time = time.time()
     globe.print_geometry_statistics()
-    #globe.plot_sphere()
-    #globe.plot_equirectangular()
-    globe.plot_flattened()
+    end_time = time.time()
+    print(f"Geometry statistics took {end_time - start_time:.2f} seconds.")
+
+    print("Plotting the globe...")
+    globe.plot_sphere()
+    end_time = time.time()
+    print(f"Globe plotting took {end_time - start_time:.2f} seconds.")
+
+    print("Plotting equirectangular projection...")
+    start_time = time.time()
+    globe.plot_equirectangular()
+    end_time = time.time()
+    print(f"Equirectangular projection plotting took {end_time - start_time:.2f} seconds.")
 
 if __name__ == '__main__':
     main()
