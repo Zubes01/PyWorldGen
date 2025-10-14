@@ -177,16 +177,50 @@ class SimulatedGlobe:
         except FileNotFoundError:
             print("\tNo cached world hexagons found, generating new ones.")
 
+        # Generate new hexagons
+        print("\tGenerating new world hexagons...")
+        start_time = time.time()
         vertices, faces = create_icosphere()
         hex_faces, face_centroids = icosphere_to_hexsphere(vertices, faces)
         for hf in hex_faces:
             poly_verts = face_centroids[hf]
             self.world_hexagons.append(WorldHexagon(np.mean(poly_verts, axis=0), poly_verts))
+        print(f"\tHexagon generation took {time.time() - start_time:.2f} seconds.")
+
+        # Convert 3D vertices to 2D (longitude, latitude)
+        print("\tCalculating equirectangular coordinates for hexagons...")
+        start_time = time.time()
+        for hexagon in self.world_hexagons:
+            lon_lat = []
+            for v in hexagon.vertices:
+                x, y, z = v
+                lon = np.arctan2(y, x)
+                lat = np.arcsin(z / np.linalg.norm(v))
+                lon_lat.append((lon, lat))
+
+            # Unwrap longitudes to avoid stretching across the map edge
+            lons = np.array([ll[0] for ll in lon_lat])
+            lats = np.array([ll[1] for ll in lon_lat])
+            # Find jumps in longitude
+            lon_diffs = np.diff(lons)
+            if np.any(np.abs(lon_diffs) > np.pi):
+                # If a jump > pi is found, unwrap longitudes
+                lons_unwrapped = lons.copy()
+                for i in range(1, len(lons_unwrapped)):
+                    diff = lons_unwrapped[i] - lons_unwrapped[i-1]
+                    if diff > np.pi:
+                        lons_unwrapped[i:] -= 2 * np.pi
+                    elif diff < -np.pi:
+                        lons_unwrapped[i:] += 2 * np.pi
+                lon_lat = list(zip(lons_unwrapped, lats))
+            hexagon.equirectangular_coords = lon_lat
+        print(f"\tEquirectangular coordinate calculation took {time.time() - start_time:.2f} seconds.")
+
 
         # Save the world hexagons to a file for faster loading next time
         with open(f'./.cache/world_hexagons_{self.recursion_level}.pkl', 'wb') as f:
             pickle.dump(self.world_hexagons, f)
-
+        print("\tGenerated and cached new world hexagons.")
 
     def map_perlin_noise(self, scale=3):
         """
@@ -262,31 +296,7 @@ class SimulatedGlobe:
         # Simple equirectangular projection for testing
         fig, ax = plt.subplots(figsize=(10, 5))
         for hexagon in self.world_hexagons:
-            # Convert 3D vertices to 2D (longitude, latitude)
-            lon_lat = []
-            for v in hexagon.vertices:
-                x, y, z = v
-                lon = np.arctan2(y, x)
-                lat = np.arcsin(z / np.linalg.norm(v))
-                lon_lat.append((lon, lat))
-
-            # Unwrap longitudes to avoid stretching across the map edge
-            lons = np.array([ll[0] for ll in lon_lat])
-            lats = np.array([ll[1] for ll in lon_lat])
-            # Find jumps in longitude
-            lon_diffs = np.diff(lons)
-            if np.any(np.abs(lon_diffs) > np.pi):
-                # If a jump > pi is found, unwrap longitudes
-                lons_unwrapped = lons.copy()
-                for i in range(1, len(lons_unwrapped)):
-                    diff = lons_unwrapped[i] - lons_unwrapped[i-1]
-                    if diff > np.pi:
-                        lons_unwrapped[i:] -= 2 * np.pi
-                    elif diff < -np.pi:
-                        lons_unwrapped[i:] += 2 * np.pi
-                lon_lat = list(zip(lons_unwrapped, lats))
-
-            polygon = plt.Polygon(lon_lat, edgecolor=None, alpha=0.5, facecolor=hexagon.color)
+            polygon = plt.Polygon(hexagon.equirectangular_coords, edgecolor=None, alpha=0.5, facecolor=hexagon.color)
             ax.add_patch(polygon)
 
         ax.set_xlim(-np.pi - 0.3, np.pi + 0.3) # Add some padding for longitudes that were unwrapped
@@ -346,18 +356,53 @@ class SimulatedGlobe:
         print(f"Max Z coord for center of hexagon: {max_z_coord_for_center_of_hexagon}")
         print(f"Min Z coord for center of hexagon: {min_z_coord_for_center_of_hexagon}")
 
+    def prepare_pyvista_plot(self):
+        """
+        Prepares to plot the globe using PyVista
+        
+        PyVista allows for plotting 3D meshes easily.
+        """
+        import pyvista as pv
+
+        points = []
+        faces = []
+        colors = []
+
+        for hexagon in self.world_hexagons:
+            start_idx = len(points)
+            for vertex in hexagon.vertices:
+                points.append(vertex)
+            face = [len(hexagon.vertices)] + list(range(start_idx, start_idx + len(hexagon.vertices)))
+            faces.extend(face)
+            print( [int(c * 255) for c in hexagon.color] )
+            colors.append([int(c * 255) for c in hexagon.color])  # Convert to 0-255 range
+
+        points = np.array(points)
+        faces = np.array(faces)
+        colors = np.array(colors, dtype=np.uint8)
+
+        mesh = pv.PolyData(points, faces)
+        # Store per-cell RGB colors (uint8 0-255). Use the same name when plotting.
+        mesh.cell_data["color"] = colors
+
+        plotter = pv.Plotter()
+        # Tell PyVista to use the cell array named "color" as RGB colors for faces
+        plotter.add_mesh(mesh, scalars="color", rgb=True, show_edges=True)
+        plotter.show()
+
 class WorldHexagon:
     def __init__(self, center, vertices):
-        self.center = center  # 3D coordinates on the sphere
-        self.vertices = vertices  # List of 3D vertex coordinates
-        self.perlin_value = None  # To be assigned later
-        self.color = None  # To be assigned later
+        self.center = center  # 3D coordinates on the sphere [x, y, z]
+        self.vertices = vertices  # List of 3D vertex coordinates [[x, y, z], ...]
+        self.perlin_value = None  # Value assigned later
+        self.color = None  # RGB tuple with values 0-1, assigned later
+        self.equirectangular_coords = None  # List of (lon, lat) tuples for 2D mapping, assigned later
         self.neighbors = []  # List of neighboring WorldHexagons
 
 def main():
     print("Creating simulated globe...")
     start_time = time.time()
-    globe = SimulatedGlobe(recursion_level=6)
+    globe = SimulatedGlobe(recursion_level=3)
     end_time = time.time()
     print(f"Globe creation took {end_time - start_time:.2f} seconds.")
 
@@ -391,16 +436,22 @@ def main():
     end_time = time.time()
     print(f"Geometry statistics took {end_time - start_time:.2f} seconds.")
 
-    print("Plotting the globe...")
-    globe.plot_sphere()
-    end_time = time.time()
-    print(f"Globe plotting took {end_time - start_time:.2f} seconds.")
+    # print("Plotting the globe...")
+    # globe.plot_sphere()
+    # end_time = time.time()
+    # print(f"Globe plotting took {end_time - start_time:.2f} seconds.")
 
-    print("Plotting equirectangular projection...")
+    print("Preparing PyVista plot...")
     start_time = time.time()
-    globe.plot_equirectangular()
+    globe.prepare_pyvista_plot()
     end_time = time.time()
-    print(f"Equirectangular projection plotting took {end_time - start_time:.2f} seconds.")
+    print(f"PyVista plotting took {end_time - start_time:.2f} seconds.")
+
+    # print("Plotting equirectangular projection...")
+    # start_time = time.time()
+    # globe.plot_equirectangular()
+    # end_time = time.time()
+    # print(f"Equirectangular projection plotting took {end_time - start_time:.2f} seconds.")
 
 if __name__ == '__main__':
     main()
