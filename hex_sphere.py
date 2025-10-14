@@ -8,6 +8,7 @@ import random
 import time
 import pickle
 import os
+from tqdm import tqdm
 
 class SimulatedGlobe:
     # Creates a sphere tiled with hexagons (and 12 pentagons) for world generation
@@ -19,14 +20,15 @@ class SimulatedGlobe:
         self.recursion_level = recursion_level
         self.world_hexagons = []
         self.noise_4d_val = np.random.uniform(0, 1000)  # Random value for 4D noise slice
-        self.create_world_hexagons()
+        self.create_world_hexagons(recursion_level)
 
-    def create_world_hexagons(self):
+    def create_world_hexagons(self, rec_lvl):
         """
         Create WorldHexagon objects for each hex/pentagon on the sphere.
         """
 
-        def create_icosphere():
+
+        def create_icosphere(recursion_level):
             """
             Creates a geodesic sphere from an icosahedron.
             
@@ -75,9 +77,9 @@ class SimulatedGlobe:
                     middle_point_cache[key] = new_index
                     return new_index
 
-            for _ in range(self.recursion_level):
+            for _ in tqdm(range(recursion_level), position=0, desc="Subdividing faces"):
                 new_faces = []
-                for tri in faces:
+                for tri in tqdm(faces, position=1, leave=False):
                     v1, v2, v3 = tri
                     a = get_middle_point(v1, v2)
                     b = get_middle_point(v2, v3)
@@ -108,13 +110,13 @@ class SimulatedGlobe:
             """
             # Find which faces are adjacent to each vertex
             vertex_to_faces = defaultdict(list)
-            for face_idx, face in enumerate(faces):
+            for face_idx, face in tqdm(enumerate(faces), position=0, desc="Finding adjacent faces"):
                 for vertex in face:
                     vertex_to_faces[vertex].append(face_idx)
             
             # Calculate face centroids (these become the vertices of the hex tiles)
             face_centroids = []
-            for face in faces:
+            for face in tqdm(faces, position=0, desc="Calculating face centroids"):
                 centroid = np.mean(vertices[face], axis=0)
                 centroid /= np.linalg.norm(centroid)  # Project back to sphere
                 face_centroids.append(centroid)
@@ -123,8 +125,8 @@ class SimulatedGlobe:
             # For each vertex in the original mesh, create a hex/pentagon
             # by ordering the centroids of adjacent faces
             hex_faces = []
-            
-            for vertex_idx in range(len(vertices)):
+
+            for vertex_idx in tqdm(range(len(vertices)), position=0, desc="Creating hex faces"):
                 adjacent_faces = vertex_to_faces[vertex_idx]
                 
                 # Order the adjacent face centroids in circular order
@@ -144,7 +146,7 @@ class SimulatedGlobe:
                 
                 # Calculate angles for each adjacent face centroid
                 angles = []
-                for face_idx in adjacent_faces:
+                for face_idx in tqdm(adjacent_faces, position=1, desc="Calculating face angles", leave=False):
                     vec = face_centroids[face_idx] - center
                     vec /= np.linalg.norm(vec)
                     # Project onto tangent plane
@@ -170,7 +172,7 @@ class SimulatedGlobe:
 
         # Check if cached hexagons exist
         try:
-            with open(f'./.cache/world_hexagons_{self.recursion_level}.pkl', 'rb') as f:
+            with open(f'./.cache/world_hexagons_{rec_lvl}.pkl', 'rb') as f:
                 self.world_hexagons = pickle.load(f)
                 print("\tLoaded cached world hexagons.")
                 return
@@ -180,7 +182,7 @@ class SimulatedGlobe:
         # Generate new hexagons
         print("\tGenerating new world hexagons...")
         start_time = time.time()
-        vertices, faces = create_icosphere()
+        vertices, faces = create_icosphere(rec_lvl)
         hex_faces, face_centroids = icosphere_to_hexsphere(vertices, faces)
         for hf in hex_faces:
             poly_verts = face_centroids[hf]
@@ -190,7 +192,7 @@ class SimulatedGlobe:
         # Convert 3D vertices to 2D (longitude, latitude)
         print("\tCalculating equirectangular coordinates for hexagons...")
         start_time = time.time()
-        for hexagon in self.world_hexagons:
+        for hexagon in tqdm(self.world_hexagons, position=0, desc="Calculating equirectangular coordinates"):
             lon_lat = []
             for v in hexagon.vertices:
                 x, y, z = v
@@ -227,7 +229,7 @@ class SimulatedGlobe:
         Map 4D Perlin noise values to each hexagon for terrain generation.
         """
         noise_gen = opensimplex.OpenSimplex(seed=random.randint(0, 10000))
-        for hexagon in self.world_hexagons:
+        for hexagon in tqdm(self.world_hexagons, position=0, desc="Mapping Perlin noise"):
             x, y, z = hexagon.center
             # Scale coordinates for noise
             # Note: using 4D noise with a fixed w value to get a 3D slice for randomness
@@ -268,13 +270,13 @@ class SimulatedGlobe:
         """
         # Create a mapping from vertex (as a tuple) to hexagons that share it
         vertex_to_hexagons = defaultdict(list)
-        for hexagon in self.world_hexagons:
+        for hexagon in tqdm(self.world_hexagons, position=0, desc="Mapping vertices to hexagons"):
             for vertex in hexagon.vertices:
                 vertex_key = tuple(np.round(vertex, decimals=6))  # Round to avoid floating point issues
                 vertex_to_hexagons[vertex_key].append(hexagon)
 
         # For each hexagon, find neighbors by looking up shared vertices
-        for hexagon in self.world_hexagons:
+        for hexagon in tqdm(self.world_hexagons, position=0, desc="Finding neighbors"):
             neighbor_set = set()
             for vertex in hexagon.vertices:
                 vertex_key = tuple(np.round(vertex, decimals=6))
@@ -288,9 +290,9 @@ class SimulatedGlobe:
         For testing: Paint a random hexagon and its neighbors red.
         """
         random_hex = random.choice(self.world_hexagons)
-        random_hex.color = (1, 0, 0)  # Red
+        random_hex.color = (1.0, 0, 0)  # Red
         for neighbor in random_hex.neighbors:
-            neighbor.color = (1, 0, 0)  # Red
+            neighbor.color = (1.0, 0, 0)  # Red
 
     def plot_equirectangular(self):
         # Simple equirectangular projection for testing
@@ -356,40 +358,57 @@ class SimulatedGlobe:
         print(f"Max Z coord for center of hexagon: {max_z_coord_for_center_of_hexagon}")
         print(f"Min Z coord for center of hexagon: {min_z_coord_for_center_of_hexagon}")
 
-    def prepare_pyvista_plot(self):
-        """
-        Prepares to plot the globe using PyVista
-        
-        PyVista allows for plotting 3D meshes easily.
-        """
-        import pyvista as pv
+    def plot_sphere_vispy(self):
+        from vispy import app, scene
+        print(app.use_app())
 
-        points = []
-        faces = []
-        colors = []
+        # Create VisPy canvas with 3D camera
+        canvas = scene.SceneCanvas(keys='interactive', show=True, bgcolor='white')
+        view = canvas.central_widget.add_view()
+        view.camera = scene.cameras.TurntableCamera(fov=45, distance=10)
+
+        colorset = set()
+        for hexagon in self.world_hexagons:
+            colorset.add(hexagon.color)
+        print(f"Unique colors used: {len(colorset)}")
+
+        all_faces = []
+        all_verts = []
+        all_face_colors = []
+        vert_offset = 0
 
         for hexagon in self.world_hexagons:
-            start_idx = len(points)
-            for vertex in hexagon.vertices:
-                points.append(vertex)
-            face = [len(hexagon.vertices)] + list(range(start_idx, start_idx + len(hexagon.vertices)))
-            faces.extend(face)
-            print( [int(c * 255) for c in hexagon.color] )
-            colors.append([int(c * 255) for c in hexagon.color])  # Convert to 0-255 range
+            these_verts = np.vstack([hexagon.center, hexagon.vertices])
+            if len(hexagon.vertices) == 5:
+                # Pentagons need to be triangulated
+                faces = np.array([
+                    [0, 1, 2],
+                    [0, 2, 3],
+                    [0, 3, 4],
+                    [0, 4, 5],
+                    [0, 5, 1],
+                ])
+            else:
+                # Hexagons can be triangulated similarly
+                faces = np.array([
+                    [0, 1, 2],
+                    [0, 2, 3],
+                    [0, 3, 4],
+                    [0, 4, 5],
+                    [0, 5, 6],
+                    [0, 6, 1],
+                ])
 
-        points = np.array(points)
-        faces = np.array(faces)
-        colors = np.array(colors, dtype=np.uint8)
+            all_verts.append(these_verts)
+            all_faces.append(faces + vert_offset)
+            all_face_colors.append([hexagon.color] * faces.shape[0])
+            vert_offset += these_verts.shape[0]
 
-        mesh = pv.PolyData(points, faces)
-        # Store per-cell RGB colors (uint8 0-255). Use the same name when plotting.
-        mesh.cell_data["color"] = colors
+        mesh = scene.visuals.Mesh(vertices=np.concatenate(all_verts), faces=np.concatenate(all_faces), face_colors=np.concatenate(all_face_colors), shading='smooth')
+        view.add(mesh)
 
-        plotter = pv.Plotter()
-        # Tell PyVista to use the cell array named "color" as RGB colors for faces
-        plotter.add_mesh(mesh, scalars="color", rgb=True, show_edges=True)
-        plotter.show()
-
+        app.run()
+        
 class WorldHexagon:
     def __init__(self, center, vertices):
         self.center = center  # 3D coordinates on the sphere [x, y, z]
@@ -402,7 +421,7 @@ class WorldHexagon:
 def main():
     print("Creating simulated globe...")
     start_time = time.time()
-    globe = SimulatedGlobe(recursion_level=3)
+    globe = SimulatedGlobe(recursion_level=7)
     end_time = time.time()
     print(f"Globe creation took {end_time - start_time:.2f} seconds.")
 
@@ -430,22 +449,22 @@ def main():
     end_time = time.time()
     print(f"Painting took {end_time - start_time:.2f} seconds.")
 
-    print("Printing geometry statistics...")
-    start_time = time.time()
-    globe.print_geometry_statistics()
-    end_time = time.time()
-    print(f"Geometry statistics took {end_time - start_time:.2f} seconds.")
+    # print("Printing geometry statistics...")
+    # start_time = time.time()
+    # globe.print_geometry_statistics()
+    # end_time = time.time()
+    # print(f"Geometry statistics took {end_time - start_time:.2f} seconds.")
 
     # print("Plotting the globe...")
     # globe.plot_sphere()
     # end_time = time.time()
     # print(f"Globe plotting took {end_time - start_time:.2f} seconds.")
 
-    print("Preparing PyVista plot...")
+    print("Plotting with VisPy...")
     start_time = time.time()
-    globe.prepare_pyvista_plot()
+    globe.plot_sphere_vispy()
     end_time = time.time()
-    print(f"PyVista plotting took {end_time - start_time:.2f} seconds.")
+    print(f"VisPy plotting took {end_time - start_time:.2f} seconds.")
 
     # print("Plotting equirectangular projection...")
     # start_time = time.time()
