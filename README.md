@@ -1,5 +1,7 @@
 # PyWorldGen
 
+![demo](./demo.gif)
+
 My fantasy world generator I built using python. Work in progress!
 
 ### Features:
