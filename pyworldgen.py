@@ -20,13 +20,14 @@ CONSTANTS
 # Globe generation parameters
 GLOBE_RECURSION_LEVEL = 6 # Level of recursion for icosphere generation
 NOISE_SCALE = 2  # Scale for noise mapping
-NUM_OCTAVES = 4  # Number of octaves for noise generation
+NOISE_NUM_OCTAVES = 3  # Number of octaves for noise generation
+NOISE_IMPORTANCE = 0.33  # Importance factor for noise contribution to height
 
 # Tectonic plate parameters
 NUM_TECTONIC_PLATES = 15 # Number of tectonic plates to create
 OCEANIC_PLATE_RATIO = 0.7  # Ratio of oceanic plates to total plates
-OCEANIC_PLATE_AVG_HEIGHT = 0.33  # Average height for oceanic plates
-CONTINENTAL_PLATE_AVG_HEIGHT = 0.66  # Average height for continental plates
+OCEANIC_PLATE_AVG_HEIGHT = 0.4  # Average height for oceanic plates
+CONTINENTAL_PLATE_AVG_HEIGHT = 0.6  # Average height for continental plates
 
 # Terrain coloring thresholds
 WATER_THRESHOLD = 0.5  # Height threshold for ocean color
@@ -298,9 +299,9 @@ class SimulatedGlobe:
     """
     Basic terrain generation (using OpenSimplex noise)
     """
-    def map_noise(self, scale, num_octaves):
+    def map_noise(self, scale, num_octaves, importance):
         """
-        Map 4D noise values to each tile for terrain generation.
+        Adds 4D noise values to each tile for terrain generation.
         """
         noise_gen = opensimplex.OpenSimplex(seed=random.randint(0, 10000))
         for tile in tqdm(self.world_tiles, position=0, desc="Mapping noise"):
@@ -318,7 +319,7 @@ class SimulatedGlobe:
             # Normalize to 0-1
             normalized_value = (value + 1) / 2
 
-            tile.height = normalized_value
+            tile.height = (1 - importance) * tile.height + importance * normalized_value
 
 
     """
@@ -447,8 +448,8 @@ class SimulatedGlobe:
             theta = random.uniform(0, 2 * np.pi)
             plate.movement_vector = np.array([np.cos(theta), np.sin(theta)])
 
-            # Scale this vector to represent movement speed (e.g., cm/year)
-            plate.movement_vector *= random.uniform(1, 10)  # cm/year
+            # Scale this vector to represent movement speed
+            plate.movement_vector *= random.uniform(0, 1)
 
             # Random rotation speed between -1 and 1 degrees per million years
             plate.rotation_speed = random.uniform(-1, 1)
@@ -485,7 +486,8 @@ class SimulatedGlobe:
                         boundary_type = 'convergent'
                     else:
                         boundary_type = 'divergent'
-                activity_level = min(movement_magnitude / 10.0, 1.0)  # Normalize to [0, 1]
+                activity_level = movement_magnitude / 2  # Normalize back to [0,1)
+                print(f"Plate {plate1_id} and Plate {plate2_id} boundary type: {boundary_type}, activity level: {activity_level:.2f}")
 
             boundary = PlateBoundary(plate1, plate2, list(boundary_tiles), boundary_type=boundary_type, activity_level=activity_level)
             self.plate_boundaries.append(boundary)
@@ -510,7 +512,7 @@ class SimulatedGlobe:
 
         # Adjust heights at plate boundaries
         for boundary in self.plate_boundaries:
-            for tile in boundary.direct_boundary_tiles:
+            for tile in boundary.affected_tiles:
                 if boundary.boundary_type == 'convergent':
                     # Raise height for convergent boundaries
                     tile.height += 0.1 * boundary.activity_level
@@ -856,8 +858,6 @@ class SimulatedGlobe:
         """
         random_hex = random.choice(self.world_tiles)
         random_hex.height += height_increase
-        # Clamp height to [0, 1]
-        random_hex.height = max(0.0, min(1.0, random_hex.height))
 
 class TectonicPlate:
     """
@@ -872,16 +872,66 @@ class TectonicPlate:
         self.boundaries = []  # List of PlateBoundary objects
         # self.noise_4d_val = np.random.uniform(0, 1000)  # Random value for 4D noise slice. Used for noise within the plate
 
+    def __repr__(self):
+        return f"TectonicPlate(plate_id={self.plate_id}, num_tiles={len(self.tiles)}, plate_type={self.plate_type})"
+    
+    def __eq__(self, value):
+        if not isinstance(value, TectonicPlate):
+            return False
+        return self.plate_id == value.plate_id
+
 class PlateBoundary:
     """
     Represents a boundary between two tectonic plates.
     """
     def __init__(self, plate1, plate2, boundary_tiles, boundary_type, activity_level):
+        # Validate inputs
+        if plate1 == plate2:
+            raise ValueError("PlateBoundary cannot be created between the same plate.")
+        if not boundary_tiles:
+            raise ValueError("PlateBoundary must have at least one boundary tile.")
+        if boundary_type not in ['convergent', 'divergent', 'transform']:
+            raise ValueError("boundary_type must be 'convergent', 'divergent', or 'transform'.")
+        if not (0 <= activity_level < 1):
+            raise ValueError("activity_level must be in the range [0, 1).")
+
         self.plate1 = plate1  # TectonicPlate object
         self.plate2 = plate2  # TectonicPlate object
         self.direct_boundary_tiles = boundary_tiles  # List of WorldTile objects along the boundary
         self.boundary_type = boundary_type  # 'convergent', 'divergent', 'transform', assigned later
         self.activity_level = activity_level  # [0,1) the intensity of the boundary activity: e.g. convergent boundaries with high activity_level have taller mountains
+        self.affected_tiles = self.get_affected_tiles_list(self.activity_level * 1000)  # Number of non-boundary tiles to add based on activity level
+
+    def __repr__(self):
+        return f"PlateBoundary(plate1={self.plate1}, plate2={self.plate2}, num_boundary_tiles={len(self.direct_boundary_tiles)}, boundary_type={self.boundary_type}, activity_level={self.activity_level})"
+    
+    def __eq__(self, value):
+        if not isinstance(value, PlateBoundary):
+            return False
+        return (self.plate1 == value.plate1 and self.plate2 == value.plate2) or (self.plate1 == value.plate2 and self.plate2 == value.plate1)
+    
+    def get_affected_tiles_list(self, num_non_boundary_tiles_to_add):
+        """
+        Grows a list of tiles affected by this boundary (both direct boundary tiles and their neighbors)
+        """
+        affected_tiles = set(self.direct_boundary_tiles)
+        frontier_tiles = set()
+        for tile in self.direct_boundary_tiles:
+            for neighbor in tile.neighbors:
+                if neighbor not in affected_tiles:
+                    frontier_tiles.add(neighbor)
+
+        while num_non_boundary_tiles_to_add > 0 and frontier_tiles:
+            chosen_tile = random.choice(list(frontier_tiles))
+            affected_tiles.add(chosen_tile)
+            num_non_boundary_tiles_to_add -= 1
+
+            for neighbor in chosen_tile.neighbors:
+                if neighbor not in affected_tiles:
+                    frontier_tiles.add(neighbor)
+
+        return list(affected_tiles)
+
 
 class WorldTile:
     """
@@ -895,7 +945,7 @@ class WorldTile:
     def __init__(self, center, vertices):
         self.center = center  # 3D coordinates on the sphere [x, y, z]
         self.vertices = vertices  # List of 3D vertex coordinates [[x, y, z], ...]
-        self.height = None  # Value assigned later
+        self.height = 0  # Value assigned later
         self.color = None  # RGB tuple with values 0-1, assigned later
         self.equirectangular_coords = None  # List of (lon, lat) tuples for 2D mapping, assigned later
         self.neighbors = []  # List of neighboring WorldTiles
@@ -911,15 +961,9 @@ Main execution
 def main():
     print("Creating simulated globe...")
     start_time = time.time()
-    globe = SimulatedGlobe(recursion_level=7, use_cache=True)
+    globe = SimulatedGlobe(recursion_level=GLOBE_RECURSION_LEVEL, use_cache=True)
     end_time = time.time()
     print(f"Globe creation took {end_time - start_time:.2f} seconds.")
-
-    print("Mapping noise...")
-    start_time = time.time()
-    globe.map_noise(scale=2.0, num_octaves=4)
-    end_time = time.time()
-    print(f"Noise mapping took {end_time - start_time:.2f} seconds.")
 
     print("Populating neighbor lists...")
     start_time = time.time()
@@ -927,23 +971,29 @@ def main():
     end_time = time.time()
     print(f"Neighbor list population took {end_time - start_time:.2f} seconds.")
 
-    # print("Assigning tectonic plates...")
-    # start_time = time.time()
-    # globe.create_tectonic_plates_spherical_voronoi(num_plates=NUM_TECTONIC_PLATES, oceanic_plate_ratio=OCEANIC_PLATE_RATIO)
-    # end_time = time.time()
-    # print(f"Tectonic plate assignment took {end_time - start_time:.2f} seconds.")
+    print("Assigning tectonic plates...")
+    start_time = time.time()
+    globe.create_tectonic_plates_spherical_voronoi(num_plates=NUM_TECTONIC_PLATES, oceanic_plate_ratio=OCEANIC_PLATE_RATIO)
+    end_time = time.time()
+    print(f"Tectonic plate assignment took {end_time - start_time:.2f} seconds.")
 
-    # print("Creating plate boundaries...")
-    # start_time = time.time()
-    # globe.create_plate_boundaries()
-    # end_time = time.time()
-    # print(f"Plate boundary creation took {end_time - start_time:.2f} seconds.")
+    print("Creating plate boundaries...")
+    start_time = time.time()
+    globe.create_plate_boundaries()
+    end_time = time.time()
+    print(f"Plate boundary creation took {end_time - start_time:.2f} seconds.")
 
-    # print("Assigning heights based on tectonic plates...")
-    # start_time = time.time()
-    # globe.assign_heights_using_plates(continental_height=CONTINENTAL_PLATE_AVG_HEIGHT, oceanic_height=OCEANIC_PLATE_AVG_HEIGHT)
-    # end_time = time.time()
-    # print(f"Height assignment took {end_time - start_time:.2f} seconds.")
+    print("Assigning heights based on tectonic plates...")
+    start_time = time.time()
+    globe.assign_heights_using_plates(continental_height=CONTINENTAL_PLATE_AVG_HEIGHT, oceanic_height=OCEANIC_PLATE_AVG_HEIGHT)
+    end_time = time.time()
+    print(f"Height assignment took {end_time - start_time:.2f} seconds.")
+
+    print("Mapping noise...")
+    start_time = time.time()
+    globe.map_noise(scale=NOISE_SCALE, num_octaves=NOISE_NUM_OCTAVES, importance=NOISE_IMPORTANCE)
+    end_time = time.time()
+    print(f"Noise mapping took {end_time - start_time:.2f} seconds.")
 
     # print("Assigning tectonic plate colors...")
     # start_time = time.time()
@@ -970,34 +1020,11 @@ def main():
     end_time = time.time()
     print(f"Height-based color assignment took {end_time - start_time:.2f} seconds.")
 
-    # print("Painting a random tile and its neighbors red...")
-    # start_time = time.time()
-    # globe.paint_random_and_neighbors_red()  # For testing neighbor functionality
-    # end_time = time.time()
-    # print(f"Painting took {end_time - start_time:.2f} seconds.")
-
-    # print("Printing geometry statistics...")
-    # start_time = time.time()
-    # globe.print_geometry_statistics()
-    # end_time = time.time()
-    # print(f"Geometry statistics took {end_time - start_time:.2f} seconds.")
-
-    # print("Plotting the globe...")
-    # globe.plot_sphere()
-    # end_time = time.time()
-    # print(f"Globe plotting took {end_time - start_time:.2f} seconds.")
-
     print("Plotting with VisPy...")
     start_time = time.time()
     globe.plot_sphere_vispy(visualize_heights=True, height_scale=0.1)
     end_time = time.time()
     print(f"VisPy plotting took {end_time - start_time:.2f} seconds.")
-
-    # print("Plotting equirectangular projection...")
-    # start_time = time.time()
-    # globe.plot_equirectangular()
-    # end_time = time.time()
-    # print(f"Equirectangular projection plotting took {end_time - start_time:.2f} seconds.")
 
 if __name__ == '__main__':
     main()

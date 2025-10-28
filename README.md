@@ -23,3 +23,4 @@ My fantasy world generator I built using python. Work in progress!
 ### Coming soon:
 
 - Plate tectonics based world generation
+- Metal accelerated Goldberg polyhedra generation using PyTorch
