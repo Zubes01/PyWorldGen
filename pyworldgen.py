@@ -13,6 +13,69 @@ import pickle
 import os
 from tqdm import tqdm
 from scipy.spatial import SphericalVoronoi
+import heapq
+
+# Shapes:
+X_POINTING_ARROW_IN_XY_PLANE_VERTICES = np.array([[-0.5,0,0], [-0.5,-1,0], [0.5,-1,0], [0.5,0,0], [-1,0,0], [1,0,0], [0,1,0]])
+X_POINTING_ARROW_IN_XY_PLANE_TRIANGLES = np.array([[0,1,2], [0,2,3], [4,5,6]])
+
+def orient_arrow(n, direction_2d, V=X_POINTING_ARROW_IN_XY_PLANE_VERTICES):
+    """
+    V: (N,3) array of vertices, initially in XY-plane pointing +X
+    n: (3,) plane normal in world space (need not be unit)
+    direction_2d: (2,) desired direction within plane (x,y)
+    """
+    # Normalize inputs
+    n = n / np.linalg.norm(n)
+    dir_2d = np.array(direction_2d, dtype=float)
+    dir_2d /= np.linalg.norm(dir_2d)
+
+    # Step 1: Build the desired direction vector (in 3D)
+    # Project the XY direction into the target plane
+    # Convert 2D direction to 3D: initially (dx, dy, 0)
+    d0 = np.array([dir_2d[0], dir_2d[1], 0.0])
+
+    # The target direction must lie in the new plane
+    # Remove any component of d0 perpendicular to n
+    d = d0 - np.dot(d0, n) * n
+    d /= np.linalg.norm(d)
+
+    # Step 2: Create an orthonormal basis for the target plane
+    x_axis = d
+    y_axis = np.cross(n, x_axis)
+    y_axis /= np.linalg.norm(y_axis)
+    z_axis = n
+
+    # Step 3: Construct rotation matrix
+    R = np.stack([x_axis, y_axis, z_axis], axis=1)  # columns are new axes
+
+    # Step 4: Apply to all vertices
+    V_rot = V @ R.T
+
+    return V_rot
+
+def orient_arrow_3d_vec(P, direction_3d, V=X_POINTING_ARROW_IN_XY_PLANE_VERTICES):
+    """
+    P: (3,) plane point in world space for the arrow to be centered on
+    direction_3d: (3,) desired 3D direction
+    V: (N,3) array of vertices, initially in XY-plane pointing +X
+    """
+
+    # Step 1: Create a rotation matrix to align the arrow with the desired direction
+    z_axis = direction_3d / np.linalg.norm(direction_3d)
+    x_axis = np.cross(z_axis, np.array([0, 0, 1]))
+    if np.linalg.norm(x_axis) < 1e-6:
+        x_axis = np.cross(z_axis, np.array([1, 0, 0]))
+    x_axis /= np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+
+    R = np.stack([x_axis, y_axis, z_axis], axis=1)
+
+    # Step 2: Apply rotation and translation to the vertices
+    V_rot = V @ R.T + P
+
+    return V_rot
+
 
 """
 CONSTANTS
@@ -44,6 +107,7 @@ LAND_HIGH_COLOR = (0, 1, 0)
 MOUNTAIN_LOW_COLOR = (0.7, 0.7, 0.7)
 MOUNTAIN_HIGH_COLOR = (0.8, 0.8, 0.8)
 SNOW_COLOR = (1, 1, 1)
+
 
 """
 Classes
@@ -236,7 +300,7 @@ class SimulatedGlobe:
         hex_faces, face_centroids = icosphere_to_hexsphere(vertices, faces)
         for hf in hex_faces:
             poly_verts = face_centroids[hf]
-            self.world_tiles.append(WorldTile(np.mean(poly_verts, axis=0), poly_verts))
+            self.world_tiles.append(WorldTile(len(self.world_tiles), np.mean(poly_verts, axis=0), poly_verts))
         print(f"\tTile generation took {time.time() - start_time:.2f} seconds.")
 
         # Convert 3D vertices to 2D (longitude, latitude)
@@ -350,7 +414,6 @@ class SimulatedGlobe:
         for plate in self.tectonic_plates:
             boundary_tiles[plate.plate_id] = set()
             for neighbor in plate.tiles[0].neighbors:
-                print(neighbor)
                 if neighbor.plate_id is None:
                     boundary_tiles[plate.plate_id].add(neighbor)
                     boundary_plates[neighbor] = boundary_plates.get(neighbor, set())
@@ -428,7 +491,7 @@ class SimulatedGlobe:
             min_dist = float('inf')
             assigned_plate_id = None
             for plate_id, center in enumerate(seed_points):
-                dist = np.arccos(np.clip(np.dot(tile.center, center), -1.0, 1.0))
+                dist = np.arccos(np.dot(tile.center, center))
                 if dist < min_dist:
                     min_dist = dist
                     assigned_plate_id = plate_id
@@ -445,14 +508,20 @@ class SimulatedGlobe:
         # Assign random movement vectors and rotation speeds
         for plate in self.tectonic_plates:
             # Random 2D movement vector tangent to sphere surface
-            theta = random.uniform(0, 2 * np.pi)
+            # theta = random.uniform(0, 2 * np.pi)
+            theta = np.pi / 2  # TODO: for testing, we make all plates move "northward"
             plate.movement_vector = np.array([np.cos(theta), np.sin(theta)])
 
             # Scale this vector to represent movement speed
             plate.movement_vector *= random.uniform(0, 1)
+            #plate.movement_vector *= 0.5  # TODO: for testing, make all plates move at 0.5 units
 
             # Random rotation speed between -1 and 1 degrees per million years
             plate.rotation_speed = random.uniform(-1, 1)
+
+        for plate in self.tectonic_plates:
+            plate.external_vertices = plate.get_plate_external_vertices()
+            plate.centroid = plate.get_plate_centroid()
 
     def create_plate_boundaries(self):
         """
@@ -477,7 +546,7 @@ class SimulatedGlobe:
             if plate1.movement_vector is not None and plate2.movement_vector is not None:
                 relative_movement = plate2.movement_vector - plate1.movement_vector
                 movement_magnitude = np.linalg.norm(relative_movement)
-                if movement_magnitude < 0.1:
+                if movement_magnitude < 0.3:
                     boundary_type = 'transform'
                 else:
                     # Check if plates are moving towards or away from each other
@@ -487,7 +556,6 @@ class SimulatedGlobe:
                     else:
                         boundary_type = 'divergent'
                 activity_level = movement_magnitude / 2  # Normalize back to [0,1)
-                print(f"Plate {plate1_id} and Plate {plate2_id} boundary type: {boundary_type}, activity level: {activity_level:.2f}")
 
             boundary = PlateBoundary(plate1, plate2, list(boundary_tiles), boundary_type=boundary_type, activity_level=activity_level)
             self.plate_boundaries.append(boundary)
@@ -510,48 +578,34 @@ class SimulatedGlobe:
             else:
                 tile.height = oceanic_height
 
-        # Adjust heights at plate boundaries
-        for boundary in self.plate_boundaries:
-            for tile in boundary.affected_tiles:
-                if boundary.boundary_type == 'convergent':
-                    # Raise height for convergent boundaries
-                    tile.height += 0.1 * boundary.activity_level
-                elif boundary.boundary_type == 'divergent':
-                    # Lower height for divergent boundaries
-                    tile.height -= 0.1 * boundary.activity_level
-                # Transform boundaries have no height change
-
-                # # Clamp height to [0, 1]
-                # tile.height = max(0.0, min(1.0, tile.height)))
-
 
     """
     Tile coloring
     """
-    def assign_terrain_colors_by_height(self, water_threshold=0.5, beach_threshold=0.52, land_threshold=0.73, mountain_threshold=0.81, water_low_color=(0, 0, 0.2), water_high_color=(0, 0, 1), beach_color=(0.86, 0.80, 0.20), land_low_color=(0, 0.4, 0), land_high_color=(0, 1, 0), mountain_low_color=(0.7, 0.7, 0.7), mountain_high_color=(0.8, 0.8, 0.8), snow_color=(1, 1, 1)):
+    def assign_terrain_colors_by_height(self):
         """
         Assign terrain colors to each tile based on height values.
         """
         for tile in self.world_tiles:
             if tile.height is None:
                 raise ValueError("Height values not mapped. Call map_noise() or assign height values using another function first.")
-            if tile.height < water_threshold:
+            if tile.height < WATER_THRESHOLD:
                 # Blue value should move from water_low_color to water_high_color based on hexagon.height
-                t = tile.height / water_threshold
-                tile.color = tuple(np.array(water_low_color) * (1 - t) + np.array(water_high_color) * t)
-            elif tile.height < beach_threshold:
-                tile.color = beach_color
-            elif tile.height < land_threshold:
+                t = tile.height / WATER_THRESHOLD
+                tile.color = tuple(np.array(WATER_LOW_COLOR) * (1 - t) + np.array(WATER_HIGH_COLOR) * t)
+            elif tile.height < BEACH_THRESHOLD:
+                tile.color = BEACH_COLOR
+            elif tile.height < LAND_THRESHOLD:
                 # Green value should move from land_low_color to land_high_color based on hexagon.height
-                t = (tile.height - water_threshold) / (land_threshold - water_threshold)
-                tile.color = tuple(np.array(land_low_color) * (1 - t) + np.array(land_high_color) * t)
-            elif tile.height < mountain_threshold:
+                t = (tile.height - WATER_THRESHOLD) / (LAND_THRESHOLD - WATER_THRESHOLD)
+                tile.color = tuple(np.array(LAND_LOW_COLOR) * (1 - t) + np.array(LAND_HIGH_COLOR) * t)
+            elif tile.height < MOUNTAIN_THRESHOLD:
                 # Gray value should move from mountain_low_color to mountain_high_color based on hexagon.height
-                t = (tile.height - land_threshold) / (mountain_threshold - land_threshold)
-                tile.color = tuple(np.array(mountain_low_color) * (1 - t) + np.array(mountain_high_color) * t)
+                t = (tile.height - LAND_THRESHOLD) / (MOUNTAIN_THRESHOLD - LAND_THRESHOLD)
+                tile.color = tuple(np.array(MOUNTAIN_LOW_COLOR) * (1 - t) + np.array(MOUNTAIN_HIGH_COLOR) * t)
             else:
                 # White color for snow
-                tile.color = snow_color
+                tile.color = SNOW_COLOR
 
     def assign_tectonic_plate_colors(self):
         """
@@ -568,6 +622,70 @@ class SimulatedGlobe:
             else:
                 tile.color = (0.5, 0.5, 0.5)  # Gray for unassigned tiles
 
+    def assign_plate_boundary_colors(self):
+        """
+        Assign colors to tiles based on plate boundaries.
+        """
+        for tile in self.world_tiles:
+            tile.color = np.array([0.8, 0.8, 0.8])  # Light gray base color
+
+        for boundary in self.plate_boundaries:
+            for tile in boundary.direct_boundary_tiles:
+                if boundary.boundary_type == 'convergent':
+                    tile.color -= np.array([0, 0.33, 0.33])  # Red for convergent
+                elif boundary.boundary_type == 'divergent':
+                    tile.color -= np.array([0.33, 0.33, 0])  # Blue for divergent
+                elif boundary.boundary_type == 'transform':
+                    tile.color -= np.array([0.33, 0, 0.33])  # Green for transform
+
+        for tile in self.world_tiles:
+            # Clamp color values to [0, 1]
+            tile.color = tuple(np.clip(tile.color, 0, 1))
+
+            # convert back to tuple
+            tile.color = tuple(tile.color)
+
+    def assign_colors_based_on_boundary_proximity(self, max_distance=0.1):
+        """
+        Assign colors to tiles based on proximity to plate boundaries.
+        """
+        for tile in self.world_tiles:
+            tile.color = tuple(np.array([1.0, 1.0, 1.0]))  # Start with white color
+
+        for boundary in self.plate_boundaries:
+            visited_tiles = set()
+            min_heap = []
+
+            starting_tile = boundary.direct_boundary_tiles[0]
+            starting_dist = boundary.calculate_distance_to_boundary_line(starting_tile.center)
+
+            heapq.heappush(min_heap, (starting_dist, starting_tile))
+            visited_tiles.add(starting_tile)
+
+            while min_heap:
+                current_distance, current_tile = heapq.heappop(min_heap)
+
+                # Assign color based on distance
+                t = current_distance / max_distance
+                t = min(max(t, 0), 1)  # Clamp t to [0, 1]
+                boundary_color = np.array([1.0, 0.0, 0.0])  # Red color for boundary
+                base_color = np.array([1.0, 1.0, 1.0])  # White base color
+                blended_color = boundary_color * (1 - t) + base_color * t # blend of boundary and base colors
+                final_color = np.min(np.stack((current_tile.color, blended_color), axis=0), axis=0)  # Darken existing color towards boundary color
+                current_tile.color = tuple(final_color)
+
+                # Explore neighbors
+                for neighbor in current_tile.neighbors:
+                    if neighbor in visited_tiles:
+                        continue
+
+                    # Calculate distance to boundary
+                    distance = boundary.calculate_distance_to_boundary_line(neighbor.center)
+                    if distance < max_distance:
+                        heapq.heappush(min_heap, (distance, neighbor))
+                        visited_tiles.add(neighbor)
+
+            print(f"Num tiles visited for boundary between plate {boundary.plate1.plate_id} and plate {boundary.plate2.plate_id}: {len(visited_tiles)}")
 
     """
     Visualization
@@ -611,9 +729,10 @@ class SimulatedGlobe:
         plt.tight_layout()
         plt.show()
 
-    def plot_sphere_vispy(self, visualize_heights=False, height_scale=0.1, shading=True):
+    def plot_sphere_vispy(self, visualize_heights=False, height_scale=0.1, shading=True, draw_plate_vectors=True, draw_north_pole=False, draw_boundary_component_vectors=True):
         from vispy import app, scene
         from vispy.visuals.filters import ShadingFilter, WireframeFilter
+        from vispy.visuals import ArrowVisual
 
         print(app.use_app())
 
@@ -711,6 +830,128 @@ class SimulatedGlobe:
         if visualize_heights:
             extra_mesh = scene.visuals.Mesh(vertices=np.array(extra_verts), faces=np.array(extra_faces), face_colors=np.concatenate(extra_colors), shading=None)
             view.add(extra_mesh)
+
+        # if draw_plate_vectors:
+        #     for plate in self.tectonic_plates:
+        #         # Draw plate movement vectors
+        #         if plate.movement_vector is not None and plate.centroid is not None:
+        #             plate_center = plate.centroid
+        #             normal_vec = plate_center / np.linalg.norm(plate_center)
+
+        #             eastward_vec = np.array([-plate_center[1], plate_center[0], 0]) / np.linalg.norm([plate_center[0], plate_center[1]])
+        #             northward_vec = np.array([plate_center[0]*plate_center[2], plate_center[1]*plate_center[2], - (plate_center[0]**2 + plate_center[1]**2)])
+        #             northward_vec /= np.linalg.norm(northward_vec)
+        #             tangent_vec = (plate.movement_vector[0] * eastward_vec + plate.movement_vector[1] * northward_vec)
+                    
+        #             stretched_verts = X_POINTING_ARROW_IN_XY_PLANE_VERTICES.copy()
+        #             # multiply all x values of the arrow by the length of the movement vector
+        #             stretched_verts[:, 1] *= np.linalg.norm(plate.movement_vector)
+
+        #             new_verts = orient_arrow_3d_vec(normal_vec, tangent_vec, stretched_verts) * 0.1  # scale arrow size
+        #             new_verts += plate_center[np.newaxis, :] * 1.05  # offset from surface slightly
+
+        #             arrow = scene.visuals.Mesh(vertices=new_verts, faces=X_POINTING_ARROW_IN_XY_PLANE_TRIANGLES, color='black', shading=None)
+        #             view.add(arrow)
+        #         else:
+        #             print(f"Plate {plate.plate_id} either has no movement vector defined or no centroid.")
+
+        if draw_plate_vectors:
+            for plate in self.tectonic_plates:
+                # Draw simple plate movement vectors from plate centroid
+                if plate.movement_vector is not None and plate.centroid is not None:
+                    plate_center = plate.centroid
+                    normal_vec = plate_center / np.linalg.norm(plate_center)
+
+                    # triangle arrow parameters
+                    arrow_length = np.linalg.norm(plate.movement_vector) * 0.2 + 0.1  # scale arrow length based on movement vector magnitude
+                    base_width = 0.05
+                    base_center = plate_center + normal_vec * 0.05  # offset from surface slightly
+
+                    # calculate eastward and northward vectors at plate centroid
+                    eastward_vec = np.array([-plate_center[1], plate_center[0], 0]) / np.linalg.norm([plate_center[0], plate_center[1]])
+                    northward_vec = np.array([plate_center[0]*plate_center[2], plate_center[1]*plate_center[2], - (plate_center[0]**2 + plate_center[1]**2)])
+                    northward_vec /= np.linalg.norm(northward_vec)
+
+                    # compute tangent vector for arrow direction
+                    tangent_vec = (plate.movement_vector[0] * eastward_vec + plate.movement_vector[1] * northward_vec)
+                    tangent_vec /= np.linalg.norm(tangent_vec)
+
+                    # define arrow vertices
+                    tip_point = base_center + tangent_vec * arrow_length
+                    base_point1 = base_center - tangent_vec * (arrow_length * 0.3) + np.cross(normal_vec, tangent_vec) * (base_width / 2)
+                    base_point2 = base_center - tangent_vec * (arrow_length * 0.3) - np.cross(normal_vec, tangent_vec) * (base_width / 2)
+
+                    # create arrow mesh
+                    arrow_verts = np.array([tip_point, base_point1, base_point2])
+                    arrow_faces = np.array([[0, 1, 2]])
+                    arrow = scene.visuals.Mesh(vertices=arrow_verts.astype(np.float32), faces=arrow_faces.astype(np.int32), color='blue', shading=None)
+                    view.add(arrow)
+                else:
+                    print(f"Plate {plate.plate_id} either has no movement vector defined or no centroid.")
+                    continue
+
+        if draw_boundary_component_vectors:
+            for boundary in self.plate_boundaries:
+                # draw two arrows at the boundary midpoint indicating the movement of each plate at that boundary
+                if boundary.boundary_centroid is not None and boundary.plate1.movement_vector is not None and boundary.plate2.movement_vector is not None:
+                    normal_vec = boundary.boundary_centroid / np.linalg.norm(boundary.boundary_centroid)
+
+                    # triangle parameters
+                    arrow_1_length = np.linalg.norm(boundary.plate1.movement_vector) * 0.2 + 0.1
+                    arrow_2_length = np.linalg.norm(boundary.plate2.movement_vector) * 0.2 + 0.1
+                    arrows_base_width = 0.03
+                    arrow_1_color = 'green'
+                    arrow_2_color = 'orange'
+
+                    # calculate eastward and northward vectors at boundary centroid
+                    eastward_vec = np.array([-normal_vec[1], normal_vec[0], 0]) / np.linalg.norm([normal_vec[0], normal_vec[1]])
+                    northward_vec = np.array([normal_vec[0]*normal_vec[2], normal_vec[1]*normal_vec[2], - (normal_vec[0]**2 + normal_vec[1]**2)])
+                    northward_vec /= np.linalg.norm(northward_vec)
+
+                    # compute tangent vectors for each plate
+                    tangent_vec_1 = (boundary.plate1.movement_vector[0] * eastward_vec + boundary.plate1.movement_vector[1] * northward_vec)
+                    tangent_vec_1 /= np.linalg.norm(tangent_vec_1)
+                    tangent_vec_2 = (boundary.plate2.movement_vector[0] * eastward_vec + boundary.plate2.movement_vector[1] * northward_vec)
+                    tangent_vec_2 /= np.linalg.norm(tangent_vec_2)
+
+                    # define arrow 1 vertices
+                    tip_point_1 = boundary.boundary_centroid + tangent_vec_1 * arrow_1_length
+                    base_point1_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) + np.cross(normal_vec, tangent_vec_1) * (arrows_base_width / 2)
+                    base_point2_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) - np.cross(normal_vec, tangent_vec_1) * (arrows_base_width / 2)
+                    arrow_1_verts = np.array([tip_point_1, base_point1_1, base_point2_1])
+                    arrow_1_faces = np.array([[0, 1, 2]])
+                    arrow_1 = scene.visuals.Mesh(vertices=arrow_1_verts.astype(np.float32), faces=arrow_1_faces.astype(np.int32), color=arrow_1_color, shading=None)
+                    view.add(arrow_1)
+
+                    # define arrow 2 vertices
+                    tip_point_2 = boundary.boundary_centroid + tangent_vec_2 * arrow_2_length
+                    base_point1_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) + np.cross(normal_vec, tangent_vec_2) * (arrows_base_width / 2)
+                    base_point2_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) - np.cross(normal_vec, tangent_vec_2) * (arrows_base_width / 2)
+                    arrow_2_verts = np.array([tip_point_2, base_point1_2, base_point2_2])
+                    arrow_2_faces = np.array([[0, 1, 2]])
+                    arrow_2 = scene.visuals.Mesh(vertices=arrow_2_verts.astype(np.float32), faces=arrow_2_faces.astype(np.int32), color=arrow_2_color, shading=None)
+                    view.add(arrow_2)
+                else:
+                    print(f"Boundary between plate {boundary.plate1.plate_id} and plate {boundary.plate2.plate_id} missing data for drawing boundary vectors.")
+                    continue
+
+        if draw_north_pole:
+            # draw a pyramid at the north pole for reference
+            north_pole_verts = np.array([
+                [0, 0, 1.1],
+                [0.1, 0, 1],
+                [0, 0.1, 1],
+                [-0.1, 0, 1],
+                [0, -0.1, 1],
+            ])
+            north_pole_faces = np.array([
+                [0, 1, 2],
+                [0, 2, 3],
+                [0, 3, 4],
+                [0, 4, 1],
+            ])
+            north_pole_mesh = scene.visuals.Mesh(vertices=north_pole_verts, faces=north_pole_faces, color='red', shading=None)
+            view.add(north_pole_mesh)
 
         if shading:
             global shading_state_index
@@ -859,6 +1100,7 @@ class SimulatedGlobe:
         random_hex = random.choice(self.world_tiles)
         random_hex.height += height_increase
 
+
 class TectonicPlate:
     """
     Represents a tectonic plate consisting of multiple WorldTiles.
@@ -872,6 +1114,13 @@ class TectonicPlate:
         self.boundaries = []  # List of PlateBoundary objects
         # self.noise_4d_val = np.random.uniform(0, 1000)  # Random value for 4D noise slice. Used for noise within the plate
 
+        # Identify centroid
+        self.centroid = self.get_plate_centroid()
+
+        # Identify external vertices
+        self.external_vertices = self.get_plate_external_vertices()
+
+
     def __repr__(self):
         return f"TectonicPlate(plate_id={self.plate_id}, num_tiles={len(self.tiles)}, plate_type={self.plate_type})"
     
@@ -879,6 +1128,40 @@ class TectonicPlate:
         if not isinstance(value, TectonicPlate):
             return False
         return self.plate_id == value.plate_id
+    
+    def get_plate_centroid(self):
+        """
+        Returns the centroid of the plate based on the centers of its tiles.
+        """
+        if not self.tiles:
+            return None
+        sum_coords = np.sum([tile.center for tile in self.tiles], axis=0)
+        centroid = sum_coords / len(self.tiles)
+        centroid /= np.linalg.norm(centroid)  # Normalize to lie on sphere surface
+        return centroid
+    
+    def get_plate_external_vertices(self):
+        """
+        Identify and return the set of vertices on the plate's exterior.
+        """
+        vertex_count = {}  # key: vertex (as tuple), value: count of how many times it appears in plate tiles
+        for tile in self.tiles:
+            for vertex in tile.vertices:
+                vertex_key = tuple(np.round(vertex, decimals=8))
+                if vertex_key in vertex_count:
+                    vertex_count[vertex_key] += 1
+                else:
+                    vertex_count[vertex_key] = 1
+
+        external_vertices = set()
+        for vertex_key, count in vertex_count.items():
+            if count < 3:  # Appears less than 3 times means it's on the exterior
+                external_vertices.add(vertex_key)
+
+        self.external_vertices = external_vertices
+
+        return external_vertices
+
 
 class PlateBoundary:
     """
@@ -900,7 +1183,14 @@ class PlateBoundary:
         self.direct_boundary_tiles = boundary_tiles  # List of WorldTile objects along the boundary
         self.boundary_type = boundary_type  # 'convergent', 'divergent', 'transform', assigned later
         self.activity_level = activity_level  # [0,1) the intensity of the boundary activity: e.g. convergent boundaries with high activity_level have taller mountains
-        self.affected_tiles = self.get_affected_tiles_list(self.activity_level * 1000)  # Number of non-boundary tiles to add based on activity level
+        self.boundary_line = self.get_boundary_line()  # List of vertices forming the boundary line
+        self.boundary_centroid = self.get_boundary_centroid()  # Centroid of the boundary line
+
+        # U = np.array([0,0,1]) - np.dot(self.boundary_centroid) # 
+        # U /= np.linalg.norm(U)
+        # V = np.cross(self.boundary_centroid, U) # perpendicular vector in tangent plane (pointing "eastward")
+        # V /= np.linalg.norm(V)
+        
 
     def __repr__(self):
         return f"PlateBoundary(plate1={self.plate1}, plate2={self.plate2}, num_boundary_tiles={len(self.direct_boundary_tiles)}, boundary_type={self.boundary_type}, activity_level={self.activity_level})"
@@ -909,30 +1199,36 @@ class PlateBoundary:
         if not isinstance(value, PlateBoundary):
             return False
         return (self.plate1 == value.plate1 and self.plate2 == value.plate2) or (self.plate1 == value.plate2 and self.plate2 == value.plate1)
+
+    def get_boundary_line(self):
+        """
+        Returns a list of vertices that together form the plate boundary.
+        """
+        return self.plate1.external_vertices.intersection(self.plate2.external_vertices)
     
-    def get_affected_tiles_list(self, num_non_boundary_tiles_to_add):
+    def calculate_distance_to_boundary_line(self, point):
         """
-        Grows a list of tiles affected by this boundary (both direct boundary tiles and their neighbors)
+        Calculate the minimum distance from a point to the boundary line.
         """
-        affected_tiles = set(self.direct_boundary_tiles)
-        frontier_tiles = set()
-        for tile in self.direct_boundary_tiles:
-            for neighbor in tile.neighbors:
-                if neighbor not in affected_tiles:
-                    frontier_tiles.add(neighbor)
+        min_distance = float('inf')
+        for vertex in self.boundary_line:
+            dist = np.arccos(np.dot(point, vertex))
+            if dist < min_distance:
+                min_distance = dist
+        return min_distance
+    
+    def get_boundary_centroid(self):
+        """
+        Returns the centroid of the boundary line vertices.
+        """
+        if not self.boundary_line:
+            return None
+        sum_coords = np.sum([np.array(vertex) for vertex in self.boundary_line], axis=0)
+        centroid = sum_coords / len(self.boundary_line)
+        centroid /= np.linalg.norm(centroid)  # Normalize to lie on sphere surface
+        return centroid
 
-        while num_non_boundary_tiles_to_add > 0 and frontier_tiles:
-            chosen_tile = random.choice(list(frontier_tiles))
-            affected_tiles.add(chosen_tile)
-            num_non_boundary_tiles_to_add -= 1
-
-            for neighbor in chosen_tile.neighbors:
-                if neighbor not in affected_tiles:
-                    frontier_tiles.add(neighbor)
-
-        return list(affected_tiles)
-
-
+    
 class WorldTile:
     """
     Represents a tile on the sphere (hexagon or pentagon).
@@ -942,7 +1238,8 @@ class WorldTile:
     """
     Standard functions
     """
-    def __init__(self, center, vertices):
+    def __init__(self, id, center, vertices):
+        self.id = id  # Unique identifier
         self.center = center  # 3D coordinates on the sphere [x, y, z]
         self.vertices = vertices  # List of 3D vertex coordinates [[x, y, z], ...]
         self.height = 0  # Value assigned later
@@ -953,6 +1250,18 @@ class WorldTile:
 
     def __repr__(self):
         return f"WorldTile(center={self.center}, num_vertices={len(self.vertices)}, height={self.height}, plate_id={self.plate_id})"
+    
+    def __eq__(self, value):
+        # for the purposes of our simulation, two WorldTiles are equal if they have the same id
+        if not isinstance(value, WorldTile):
+            return False
+        return self.id == value.id
+    
+    def __lt__(self, value):
+        return self.id < value.id
+    
+    def __hash__(self):
+        return hash(self.id)
 
 
 """
@@ -983,17 +1292,17 @@ def main():
     end_time = time.time()
     print(f"Plate boundary creation took {end_time - start_time:.2f} seconds.")
 
-    print("Assigning heights based on tectonic plates...")
-    start_time = time.time()
-    globe.assign_heights_using_plates(continental_height=CONTINENTAL_PLATE_AVG_HEIGHT, oceanic_height=OCEANIC_PLATE_AVG_HEIGHT)
-    end_time = time.time()
-    print(f"Height assignment took {end_time - start_time:.2f} seconds.")
+    # print("Assigning heights based on tectonic plates...")
+    # start_time = time.time()
+    # globe.assign_heights_using_plates(continental_height=CONTINENTAL_PLATE_AVG_HEIGHT, oceanic_height=OCEANIC_PLATE_AVG_HEIGHT)
+    # end_time = time.time()
+    # print(f"Height assignment took {end_time - start_time:.2f} seconds.")
 
-    print("Mapping noise...")
-    start_time = time.time()
-    globe.map_noise(scale=NOISE_SCALE, num_octaves=NOISE_NUM_OCTAVES, importance=NOISE_IMPORTANCE)
-    end_time = time.time()
-    print(f"Noise mapping took {end_time - start_time:.2f} seconds.")
+    # print("Mapping noise...")
+    # start_time = time.time()
+    # globe.map_noise(scale=NOISE_SCALE, num_octaves=NOISE_NUM_OCTAVES, importance=NOISE_IMPORTANCE)
+    # end_time = time.time()
+    # print(f"Noise mapping took {end_time - start_time:.2f} seconds.")
 
     # print("Assigning tectonic plate colors...")
     # start_time = time.time()
@@ -1001,28 +1310,40 @@ def main():
     # end_time = time.time()
     # print(f"Tectonic plate color assignment took {end_time - start_time:.2f} seconds.")
 
-    print("Assigning terrain colors based on height...")
+    print("Assigning plate boundary colors...")
     start_time = time.time()
-    globe.assign_terrain_colors_by_height(
-        water_threshold=WATER_THRESHOLD,
-        beach_threshold=BEACH_THRESHOLD,
-        land_threshold=LAND_THRESHOLD,
-        mountain_threshold=MOUNTAIN_THRESHOLD,
-        water_low_color=WATER_LOW_COLOR,
-        water_high_color=WATER_HIGH_COLOR,
-        beach_color=BEACH_COLOR,
-        land_low_color=LAND_LOW_COLOR,
-        land_high_color=LAND_HIGH_COLOR,
-        mountain_low_color=MOUNTAIN_LOW_COLOR,
-        mountain_high_color=MOUNTAIN_HIGH_COLOR,
-        snow_color=SNOW_COLOR,
-    )
+    globe.assign_plate_boundary_colors()
     end_time = time.time()
-    print(f"Height-based color assignment took {end_time - start_time:.2f} seconds.")
+    print(f"Plate boundary color assignment took {end_time - start_time:.2f} seconds.")
+
+    # print("Assigning colors based on boundary proximity...")
+    # start_time = time.time()
+    # globe.assign_colors_based_on_boundary_proximity()
+    # end_time = time.time()
+    # print(f"Boundary proximity color assignment took {end_time - start_time:.2f} seconds.")
+
+    # print("Assigning terrain colors based on height...")
+    # start_time = time.time()
+    # globe.assign_terrain_colors_by_height(
+    #     water_threshold=WATER_THRESHOLD,
+    #     beach_threshold=BEACH_THRESHOLD,
+    #     land_threshold=LAND_THRESHOLD,
+    #     mountain_threshold=MOUNTAIN_THRESHOLD,
+    #     water_low_color=WATER_LOW_COLOR,
+    #     water_high_color=WATER_HIGH_COLOR,
+    #     beach_color=BEACH_COLOR,
+    #     land_low_color=LAND_LOW_COLOR,
+    #     land_high_color=LAND_HIGH_COLOR,
+    #     mountain_low_color=MOUNTAIN_LOW_COLOR,
+    #     mountain_high_color=MOUNTAIN_HIGH_COLOR,
+    #     snow_color=SNOW_COLOR,
+    # )
+    # end_time = time.time()
+    # print(f"Height-based color assignment took {end_time - start_time:.2f} seconds.")
 
     print("Plotting with VisPy...")
     start_time = time.time()
-    globe.plot_sphere_vispy(visualize_heights=True, height_scale=0.1)
+    globe.plot_sphere_vispy(visualize_heights=False, height_scale=0.1, draw_north_pole=True)
     end_time = time.time()
     print(f"VisPy plotting took {end_time - start_time:.2f} seconds.")
 
