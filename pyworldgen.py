@@ -504,20 +504,25 @@ class SimulatedGlobe:
                 plate.plate_type = 'oceanic'
             else:
                 plate.plate_type = 'continental'
+            plate.centroid = plate.get_plate_centroid()
 
         # Assign random movement vectors and rotation speeds
         for plate in self.tectonic_plates:
-            # Random 2D movement vector tangent to sphere surface
-            # theta = random.uniform(0, 2 * np.pi)
-            theta = np.pi / 2  # TODO: for testing, we make all plates move "northward"
-            plate.movement_vector = np.array([np.cos(theta), np.sin(theta)])
+            # # Random 2D movement vector tangent to sphere surface
+            # # theta = random.uniform(0, 2 * np.pi)
+            # theta = np.pi / 2  # TODO: for testing, we make all plates move "northward"
+            # plate.movement_vector = np.array([np.cos(theta), np.sin(theta)])
 
-            # Scale this vector to represent movement speed
-            plate.movement_vector *= random.uniform(0, 1)
-            #plate.movement_vector *= 0.5  # TODO: for testing, make all plates move at 0.5 units
+            # # Scale this vector to represent movement speed
+            # plate.movement_vector *= random.uniform(0, 1)
+            # #plate.movement_vector *= 0.5  # TODO: for testing, make all plates move at 0.5 units
 
-            # Random rotation speed between -1 and 1 degrees per million years
-            plate.rotation_speed = random.uniform(-1, 1)
+            # # Random rotation speed between -1 and 1 degrees per million years
+            # plate.rotation_speed = random.uniform(-1, 1)
+
+            plate.movement_vector = np.random.uniform(0, 2 * np.pi, size=3)
+            plate.rotation_scalar = np.random.uniform(0, 2 * np.pi)
+            plate.rotation_vector = plate.rotation_scalar * ( plate.centroid / np.linalg.norm(plate.centroid) )
 
         for plate in self.tectonic_plates:
             plate.external_vertices = plate.get_plate_external_vertices()
@@ -729,7 +734,7 @@ class SimulatedGlobe:
         plt.tight_layout()
         plt.show()
 
-    def plot_sphere_vispy(self, visualize_heights=False, height_scale=0.1, shading=True, draw_plate_vectors=True, draw_north_pole=False, draw_boundary_component_vectors=True):
+    def plot_sphere_vispy(self, visualize_heights=False, height_scale=0.1, shading=True, draw_plate_vectors=True, draw_north_pole=False, draw_boundary_component_vectors=True, draw_randomly_sampled_vectors=True):
         from vispy import app, scene
         from vispy.visuals.filters import ShadingFilter, WireframeFilter
         from vispy.visuals import ArrowVisual
@@ -859,22 +864,23 @@ class SimulatedGlobe:
             for plate in self.tectonic_plates:
                 # Draw simple plate movement vectors from plate centroid
                 if plate.movement_vector is not None and plate.centroid is not None:
-                    plate_center = plate.centroid
-                    normal_vec = plate_center / np.linalg.norm(plate_center)
+                    normal_vec = plate.centroid / np.linalg.norm(plate.centroid)
 
                     # triangle arrow parameters
-                    arrow_length = np.linalg.norm(plate.movement_vector) * 0.2 + 0.1  # scale arrow length based on movement vector magnitude
-                    base_width = 0.05
-                    base_center = plate_center + normal_vec * 0.05  # offset from surface slightly
+                    base_width = 0.003
+                    base_center = plate.centroid + normal_vec * 0.05  # offset from surface slightly
 
-                    # calculate eastward and northward vectors at plate centroid
-                    eastward_vec = np.array([-plate_center[1], plate_center[0], 0]) / np.linalg.norm([plate_center[0], plate_center[1]])
-                    northward_vec = np.array([plate_center[0]*plate_center[2], plate_center[1]*plate_center[2], - (plate_center[0]**2 + plate_center[1]**2)])
-                    northward_vec /= np.linalg.norm(northward_vec)
+                    # # calculate eastward and northward vectors at plate centroid
+                    # eastward_vec = np.array([-plate_center[1], plate_center[0], 0]) / np.linalg.norm([plate_center[0], plate_center[1]])
+                    # northward_vec = np.array([plate_center[0]*plate_center[2], plate_center[1]*plate_center[2], - (plate_center[0]**2 + plate_center[1]**2)])
+                    # northward_vec /= np.linalg.norm(northward_vec)
 
-                    # compute tangent vector for arrow direction
-                    tangent_vec = (plate.movement_vector[0] * eastward_vec + plate.movement_vector[1] * northward_vec)
-                    tangent_vec /= np.linalg.norm(tangent_vec)
+                    # # compute tangent vector for arrow direction
+                    # tangent_vec = (plate.movement_vector[0] * eastward_vec + plate.movement_vector[1] * northward_vec)
+                    # tangent_vec /= np.linalg.norm(tangent_vec)
+                    total_movement_vector = plate.movement_vector + plate.rotation_vector
+                    tangent_vec = np.cross(total_movement_vector, (plate.centroid / np.linalg.norm(plate.centroid)))
+                    arrow_length = np.linalg.norm(tangent_vec) * 0.0001 + 0.01  # scale arrow length based on movement vector magnitude
 
                     # define arrow vertices
                     tip_point = base_center + tangent_vec * arrow_length
@@ -886,6 +892,7 @@ class SimulatedGlobe:
                     arrow_faces = np.array([[0, 1, 2]])
                     arrow = scene.visuals.Mesh(vertices=arrow_verts.astype(np.float32), faces=arrow_faces.astype(np.int32), color='blue', shading=None)
                     view.add(arrow)
+
                 else:
                     print(f"Plate {plate.plate_id} either has no movement vector defined or no centroid.")
                     continue
@@ -894,30 +901,57 @@ class SimulatedGlobe:
             for boundary in self.plate_boundaries:
                 # draw two arrows at the boundary midpoint indicating the movement of each plate at that boundary
                 if boundary.boundary_centroid is not None and boundary.plate1.movement_vector is not None and boundary.plate2.movement_vector is not None:
-                    normal_vec = boundary.boundary_centroid / np.linalg.norm(boundary.boundary_centroid)
+                    # normal_vec = boundary.boundary_centroid / np.linalg.norm(boundary.boundary_centroid)
 
-                    # triangle parameters
-                    arrow_1_length = np.linalg.norm(boundary.plate1.movement_vector) * 0.2 + 0.1
-                    arrow_2_length = np.linalg.norm(boundary.plate2.movement_vector) * 0.2 + 0.1
-                    arrows_base_width = 0.03
+                    # # triangle parameters
+                    # arrow_1_length = np.linalg.norm(boundary.plate1.movement_vector) * 0.2 + 0.1
+                    # arrow_2_length = np.linalg.norm(boundary.plate2.movement_vector) * 0.2 + 0.1
+                    # arrows_base_width = 0.03
+                    # arrow_1_color = 'green'
+                    # arrow_2_color = 'orange'
+
+                    # # calculate eastward and northward vectors at boundary centroid
+                    # eastward_vec = np.array([-normal_vec[1], normal_vec[0], 0]) / np.linalg.norm([normal_vec[0], normal_vec[1]])
+                    # northward_vec = np.array([normal_vec[0]*normal_vec[2], normal_vec[1]*normal_vec[2], - (normal_vec[0]**2 + normal_vec[1]**2)])
+                    # northward_vec /= np.linalg.norm(northward_vec)
+
+                    # # compute tangent vectors for each plate
+                    # tangent_vec_1 = (boundary.plate1.movement_vector[0] * eastward_vec + boundary.plate1.movement_vector[1] * northward_vec)
+                    # tangent_vec_1 /= np.linalg.norm(tangent_vec_1)
+                    # tangent_vec_2 = (boundary.plate2.movement_vector[0] * eastward_vec + boundary.plate2.movement_vector[1] * northward_vec)
+                    # tangent_vec_2 /= np.linalg.norm(tangent_vec_2)
+
+                    # # define arrow 1 vertices
+                    # tip_point_1 = boundary.boundary_centroid + tangent_vec_1 * arrow_1_length
+                    # base_point1_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) + np.cross(normal_vec, tangent_vec_1) * (arrows_base_width / 2)
+                    # base_point2_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) - np.cross(normal_vec, tangent_vec_1) * (arrows_base_width / 2)
+                    # arrow_1_verts = np.array([tip_point_1, base_point1_1, base_point2_1])
+                    # arrow_1_faces = np.array([[0, 1, 2]])
+                    # arrow_1 = scene.visuals.Mesh(vertices=arrow_1_verts.astype(np.float32), faces=arrow_1_faces.astype(np.int32), color=arrow_1_color, shading=None)
+                    # view.add(arrow_1)
+
+                    # # define arrow 2 vertices
+                    # tip_point_2 = boundary.boundary_centroid + tangent_vec_2 * arrow_2_length
+                    # base_point1_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) + np.cross(normal_vec, tangent_vec_2) * (arrows_base_width / 2)
+                    # base_point2_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) - np.cross(normal_vec, tangent_vec_2) * (arrows_base_width / 2)
+                    # arrow_2_verts = np.array([tip_point_2, base_point1_2, base_point2_2])
+                    # arrow_2_faces = np.array([[0, 1, 2]])
+                    # arrow_2 = scene.visuals.Mesh(vertices=arrow_2_verts.astype(np.float32), faces=arrow_2_faces.astype(np.int32), color=arrow_2_color, shading=None)
+                    # view.add(arrow_2)
+                    total_movement_vector_1 = boundary.plate1.movement_vector + boundary.plate1.rotation_vector
+                    total_movement_vector_2 = boundary.plate2.movement_vector + boundary.plate2.rotation_vector
+                    tangent_vec_1 = np.cross(total_movement_vector_1, (boundary.boundary_centroid / np.linalg.norm(boundary.boundary_centroid)))
+                    tangent_vec_2 = np.cross(total_movement_vector_2, (boundary.boundary_centroid / np.linalg.norm(boundary.boundary_centroid)))
+                    arrow_1_length = np.linalg.norm(tangent_vec_1) * 0.0001 + 0.01
+                    arrow_2_length = np.linalg.norm(tangent_vec_2) * 0.0001 + 0.01
+                    arrows_base_width = 0.003
                     arrow_1_color = 'green'
                     arrow_2_color = 'orange'
 
-                    # calculate eastward and northward vectors at boundary centroid
-                    eastward_vec = np.array([-normal_vec[1], normal_vec[0], 0]) / np.linalg.norm([normal_vec[0], normal_vec[1]])
-                    northward_vec = np.array([normal_vec[0]*normal_vec[2], normal_vec[1]*normal_vec[2], - (normal_vec[0]**2 + normal_vec[1]**2)])
-                    northward_vec /= np.linalg.norm(northward_vec)
-
-                    # compute tangent vectors for each plate
-                    tangent_vec_1 = (boundary.plate1.movement_vector[0] * eastward_vec + boundary.plate1.movement_vector[1] * northward_vec)
-                    tangent_vec_1 /= np.linalg.norm(tangent_vec_1)
-                    tangent_vec_2 = (boundary.plate2.movement_vector[0] * eastward_vec + boundary.plate2.movement_vector[1] * northward_vec)
-                    tangent_vec_2 /= np.linalg.norm(tangent_vec_2)
-
                     # define arrow 1 vertices
                     tip_point_1 = boundary.boundary_centroid + tangent_vec_1 * arrow_1_length
-                    base_point1_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) + np.cross(normal_vec, tangent_vec_1) * (arrows_base_width / 2)
-                    base_point2_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) - np.cross(normal_vec, tangent_vec_1) * (arrows_base_width / 2)
+                    base_point1_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) + np.cross(boundary.boundary_centroid, tangent_vec_1) * (arrows_base_width / 2)
+                    base_point2_1 = boundary.boundary_centroid - tangent_vec_1 * (arrow_1_length * 0.3) - np.cross(boundary.boundary_centroid, tangent_vec_1) * (arrows_base_width / 2)
                     arrow_1_verts = np.array([tip_point_1, base_point1_1, base_point2_1])
                     arrow_1_faces = np.array([[0, 1, 2]])
                     arrow_1 = scene.visuals.Mesh(vertices=arrow_1_verts.astype(np.float32), faces=arrow_1_faces.astype(np.int32), color=arrow_1_color, shading=None)
@@ -925,14 +959,44 @@ class SimulatedGlobe:
 
                     # define arrow 2 vertices
                     tip_point_2 = boundary.boundary_centroid + tangent_vec_2 * arrow_2_length
-                    base_point1_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) + np.cross(normal_vec, tangent_vec_2) * (arrows_base_width / 2)
-                    base_point2_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) - np.cross(normal_vec, tangent_vec_2) * (arrows_base_width / 2)
+                    base_point1_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) + np.cross(boundary.boundary_centroid, tangent_vec_2) * (arrows_base_width / 2)
+                    base_point2_2 = boundary.boundary_centroid - tangent_vec_2 * (arrow_2_length * 0.3) - np.cross(boundary.boundary_centroid, tangent_vec_2) * (arrows_base_width / 2)
                     arrow_2_verts = np.array([tip_point_2, base_point1_2, base_point2_2])
                     arrow_2_faces = np.array([[0, 1, 2]])
                     arrow_2 = scene.visuals.Mesh(vertices=arrow_2_verts.astype(np.float32), faces=arrow_2_faces.astype(np.int32), color=arrow_2_color, shading=None)
                     view.add(arrow_2)
                 else:
                     print(f"Boundary between plate {boundary.plate1.plate_id} and plate {boundary.plate2.plate_id} missing data for drawing boundary vectors.")
+                    continue
+
+        if draw_randomly_sampled_vectors:
+            # draw movement vectors at randomly sampled tile centers
+            sampled_tiles = random.sample(self.world_tiles, k=200)
+            for tile in sampled_tiles:
+                plate = self.tectonic_plates[tile.plate_id]
+                if plate.movement_vector is not None:
+                    normal_vec = tile.center / np.linalg.norm(tile.center)
+
+                    # triangle arrow parameters
+                    base_width = 0.003
+                    base_center = tile.center + normal_vec * 0.05  # offset from surface slightly
+
+                    total_movement_vector = plate.movement_vector + plate.rotation_vector
+                    tangent_vec = np.cross(total_movement_vector, (tile.center / np.linalg.norm(tile.center)))
+                    arrow_length = np.linalg.norm(tangent_vec) * 0.0001 + 0.01  # scale arrow length based on movement vector magnitude
+
+                    # define arrow vertices
+                    tip_point = base_center + tangent_vec * arrow_length
+                    base_point1 = base_center - tangent_vec * (arrow_length * 0.3) + np.cross(normal_vec, tangent_vec) * (base_width / 2)
+                    base_point2 = base_center - tangent_vec * (arrow_length * 0.3) - np.cross(normal_vec, tangent_vec) * (base_width / 2)
+
+                    # create arrow mesh
+                    arrow_verts = np.array([tip_point, base_point1, base_point2])
+                    arrow_faces = np.array([[0, 1, 2]])
+                    arrow = scene.visuals.Mesh(vertices=arrow_verts.astype(np.float32), faces=arrow_faces.astype(np.int32), color='purple', shading=None)
+                    view.add(arrow)
+                else:
+                    print(f"Tile's plate {plate.plate_id} has no movement vector defined.")
                     continue
 
         if draw_north_pole:
@@ -1175,8 +1239,8 @@ class PlateBoundary:
             raise ValueError("PlateBoundary must have at least one boundary tile.")
         if boundary_type not in ['convergent', 'divergent', 'transform']:
             raise ValueError("boundary_type must be 'convergent', 'divergent', or 'transform'.")
-        if not (0 <= activity_level < 1):
-            raise ValueError("activity_level must be in the range [0, 1).")
+        # if not (0 <= activity_level < 1):
+        #     raise ValueError("activity_level must be in the range [0, 1).")
 
         self.plate1 = plate1  # TectonicPlate object
         self.plate2 = plate2  # TectonicPlate object
