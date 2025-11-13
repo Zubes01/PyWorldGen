@@ -4,7 +4,7 @@ Imports
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from math import sqrt
+from math import sqrt, log10
 from collections import defaultdict, deque
 import opensimplex
 import random
@@ -60,6 +60,9 @@ def convert_difference_in_normalized_to_km(diff_normalized):
 """
 CONSTANTS
 """
+# Calculation tolerances
+FLOAT_TOLERANCE = 1e-6 # Tolerance for floating point comparisons
+
 # Geographic constants
 SEA_LEVEL_HEIGHT = 0.0  # Sea level at 0 km
 HIGHEST_POINT_ELEVATION_KM = 9.0  # Height of Mount Everest rounded to nearest km
@@ -73,7 +76,7 @@ CONTINENTAL_PLATE_AVG_HEIGHT_HIGH_KM = 1.0  # Average height of continental plat
 GLOBE_RECURSION_LEVEL = 6  # Level of recursion for icosphere generation
 GLOBAL_NOISE_SCALE = 2  # Scale for noise mapping
 GLOBAL_NOISE_NUM_OCTAVES = 3  # Number of octaves for noise generation
-GLOBAL_NOISE_AMPLITUDE = 0.0  # Amplitude for noise contribution to height when using plate-based generation
+GLOBAL_NOISE_AMPLITUDE = 0.15  # Amplitude for noise contribution to height when using plate-based generation
 
 # Tectonic plate parameters
 NUM_TECTONIC_PLATES = 15 # Number of tectonic plates to create
@@ -83,8 +86,8 @@ PLATE_INTERNAL_NOISE_NUM_OCTAVES = 3  # Number of octaves for noise generation i
 PLATE_INTERNAL_NOISE_AMPLITUDE = 0.0  # Amplitude for noise contribution to plate internal height variation
 
 # Tectonic simulation parameters
-MILLION_YEARS_PER_SIMULATION_STEP = 10 # 100 million years per simulation step
-GAUSSIAN_DECAY_RATE = 0.05  # Rate for Gaussian decay function in deformation simulation
+MILLION_YEARS_PER_SIMULATION_STEP = 10 # 10 million years per simulation step
+GAUSSIAN_DECAY_RATE = 0.1  # Rate for Gaussian decay function in deformation simulation
 DEFORMATION_THRESHOLD = 0.001  # Minimum deformation magnitude to apply to a tile
 
 # Deformation rates (in km per million years)
@@ -104,17 +107,13 @@ OCEANIC_CONTINENTAL_CONVERGENT_SUBDUCTION_RATE_KM_PER_MILLION_YEAR = -0.3  # Sub
 # Noise parameters for tectonic deformation
 NOISE_SCALE_FOR_TECTONIC_DEFORMATION = 8  # Scale for noise mapping in tectonic deformation
 NOISE_OCTAVES_FOR_TECTONIC_DEFORMATION = 2  # Number of octaves for noise generation in tectonic deformation
-NOISE_AMPLITUDE_FOR_TECTONIC_DEFORMATION = 0.0  # Amplitude for noise contribution to tectonic deformation
+NOISE_AMPLITUDE_FOR_TECTONIC_DEFORMATION = 0.2  # Amplitude for noise contribution to tectonic deformation
 
 # Terrain coloring thresholds
-# WATER_THRESHOLD = 0.5  # Height threshold for ocean color
-# BEACH_THRESHOLD = 0.52  # Height threshold for beach color
-# LAND_THRESHOLD = 0.73  # Height threshold for land color
-# MOUNTAIN_THRESHOLD = 0.81  # Height threshold for mountain color
 WATER_THRESHOLD = convert_from_sea_level_height_km(0.0) # everything below this will be water
-BEACH_THRESHOLD = convert_from_sea_level_height_km(0.1) # everything between WATER_THRESHOLD and BEACH_THRESHOLD will be beach
-LAND_THRESHOLD = convert_from_sea_level_height_km(3.0) # everything between BEACH_THRESHOLD and LAND_THRESHOLD will be land
-MOUNTAIN_THRESHOLD = convert_from_sea_level_height_km(4.0) # everything between LAND_THRESHOLD and MOUNTAIN_THRESHOLD will be mountain
+BEACH_THRESHOLD = convert_from_sea_level_height_km(0.5) # everything between WATER_THRESHOLD and BEACH_THRESHOLD will be beach
+LAND_THRESHOLD = convert_from_sea_level_height_km(4.0) # everything between BEACH_THRESHOLD and LAND_THRESHOLD will be land
+MOUNTAIN_THRESHOLD = convert_from_sea_level_height_km(5.0) # everything between LAND_THRESHOLD and MOUNTAIN_THRESHOLD will be mountain
 # above MOUNTAIN_THRESHOLD will be snow
 
 # Terrain colors
@@ -150,6 +149,8 @@ class SimulatedGlobe:
         self.plate_boundaries = [] # list of PlateBoundary objects
         self.noise_4d_val = np.random.uniform(0, 1000)  # Random value for 4D noise slice
         self.create_world_tiles(recursion_level)
+
+        self.world_edges, self.world_vertices = self.get_world_edges_and_world_vertices()
 
     """
     Generating the tiles
@@ -377,7 +378,50 @@ class SimulatedGlobe:
                         neighbor_set.add(neighbor)
             tile.neighbors = list(neighbor_set)
 
+    def get_world_edges_and_world_vertices(self):
+        """
+        Gets the edges and vertices of the globe's tiles.
+        """
+        num_decimal_places = log10(1 / FLOAT_TOLERANCE)
 
+        all_world_vertices = defaultdict(lambda: None) # key: (position tuple), value: WorldVertex
+        all_world_edges_dict = defaultdict(lambda: None)    # key: (v1_key, v2_key), value: index in all_world_edges
+        all_world_edges = []
+        num_vertices = 0
+        for tile in tqdm(self.world_tiles, position=0, desc="Processing tiles to get vertices"):
+            for v in tile.vertices:
+                v_key = tuple(np.array(v * 10 ** num_decimal_places).astype(int)) # Round to avoid floating point issues
+
+                if all_world_vertices[v_key] is None:
+                    new_vertex = WorldVertex(num_vertices, v)
+                    all_world_vertices[v_key] = new_vertex
+                    num_vertices += 1
+                all_world_vertices[v_key].adjacent_tiles.append(tile)
+                tile.world_vertices.add(all_world_vertices[v_key])
+
+        for tile in tqdm(self.world_tiles, position=0, desc="Processing tiles to get edges"):
+            vertex_keys = np.array(tile.vertices * 10 ** num_decimal_places).astype(int)
+            tile_vertex_keys = [tuple(vk) for vk in vertex_keys]
+            num_tile_vertices = len(tile_vertex_keys)
+            for i in range(num_tile_vertices):
+                v1_key = tile_vertex_keys[i]
+                v2_key = tile_vertex_keys[(i + 1) % num_tile_vertices] # wrap around to first vertex
+
+                edge_key = tuple(sorted((v1_key, v2_key)))
+                if all_world_edges_dict[edge_key] is None:
+                    v1 = all_world_vertices[v1_key]
+                    v2 = all_world_vertices[v2_key]
+                    v1.neighboring_vertices.append(v2)
+                    v2.neighboring_vertices.append(v1)
+                    new_edge = WorldEdge(v1, v2)
+                    all_world_edges.append(new_edge)
+                    all_world_edges_dict[edge_key] = len(all_world_edges) - 1
+                edge_idx = all_world_edges_dict[edge_key]
+                all_world_edges[edge_idx].adjacent_tiles.append(tile)
+                tile.world_edges.add(all_world_edges[edge_idx])
+
+        return all_world_edges, list(all_world_vertices.values())
+            
     """
     Basic terrain generation (using OpenSimplex noise)
     """
@@ -435,7 +479,7 @@ class SimulatedGlobe:
     """
     Tectonic plate generation and simulation
     """
-    def create_tectonic_plates(self, num_plates):
+    def create_tectonic_plates_with_voronoi(self, num_plates):
         """
         Create tectonic plates using spherical Voronoi tessellation.
         """
@@ -477,6 +521,130 @@ class SimulatedGlobe:
             plate = TectonicPlate(plate_id, plate_ids_to_tiles[plate_id])
             self.tectonic_plates.append(plate)
 
+    def create_tectonic_plates_using_random_growth(self, num_plates):
+        """
+        Create tectonic plates using a random plate growth algorithm.
+
+        Idea: start with no tiles assigned to plates.
+
+        Select num_plates random seed tiles on the globe, and assign each to a different plate.
+
+        Then, choose a random unassigned tile that is adjacent to an assigned tile, 
+        and assign it to the same plate as that adjacent tile.
+        """
+        plate_lists = [[] for _ in range(num_plates)]
+        unassigned_tiles = set(self.world_tiles)
+
+        # Select random seed tiles for each plate
+        for plate_id in range(num_plates):
+            seed_tile = random.choice(list(unassigned_tiles))
+            seed_tile.plate_id = plate_id
+            plate_lists[plate_id].append(seed_tile)
+            unassigned_tiles.remove(seed_tile)
+
+        frontier_tiles = set()
+        for plate_id in range(num_plates):
+            for tile in plate_lists[plate_id]:
+                for neighbor in tile.neighbors:
+                    if neighbor in unassigned_tiles:
+                        frontier_tiles.add(neighbor)
+
+        while len(unassigned_tiles) > 0:
+            current_tile = random.choice(list(frontier_tiles))
+            # Find assigned neighbor(s)
+            assigned_neighbors = [n for n in current_tile.neighbors if n not in unassigned_tiles]
+            
+            # Randomly select one assigned neighbor to determine plate assignment
+            chosen_neighbor = random.choice(assigned_neighbors)
+            current_tile.plate_id = chosen_neighbor.plate_id
+            plate_lists[chosen_neighbor.plate_id].append(current_tile)
+            unassigned_tiles.remove(current_tile)
+            frontier_tiles.remove(current_tile)
+
+            # Add new frontier tiles
+            for neighbor in current_tile.neighbors:
+                if neighbor in unassigned_tiles:
+                    frontier_tiles.add(neighbor)
+
+        # Finally, create the plate objects from the tile assignments
+        self.tectonic_plates = []
+        for plate_id in range(num_plates):
+            plate = TectonicPlate(plate_id, plate_lists[plate_id])
+            self.tectonic_plates.append(plate)
+
+    def create_tectonic_plates_using_noise_guided_growth(self, num_plates):
+        """
+        Create tectonic plates using a noise-guided plate growth algorithm.
+
+        Idea: start with no tiles assigned to plates.
+
+        Select num_plates random seed tiles on the globe, and assign each to a different plate.
+
+        Then, choose a random unassigned tile that is adjacent to an assigned tile, 
+        and assign it to the same plate as that adjacent tile.
+
+        TODO: This version has an issue where plates can end up inside other plates!
+        """
+        noise_gen = opensimplex.OpenSimplex(seed=random.randint(0, 10000))
+        random_noise_offset = np.random.uniform(0, 1000)
+        noise_values = {}
+        for tile in self.world_tiles:
+            x, y, z = tile.center
+
+            num_octaves = 3
+            scale = 10
+            amp = 1
+
+            noise_value = 0
+            for octave in range(num_octaves):
+                frequency = 2 ** octave
+                amp = 0.5 ** octave
+                noise_value += amp * noise_gen.noise4(x * scale * frequency, y * scale * frequency, z * scale * frequency, random_noise_offset)
+            noise_values[tile] = noise_value
+
+        plate_lists = [[] for _ in range(num_plates)]
+        unassigned_tiles = set(self.world_tiles)
+
+        # Select random seed tiles for each plate
+        for plate_id in range(num_plates):
+            seed_tile = random.choice(list(unassigned_tiles))
+            seed_tile.plate_id = plate_id
+            plate_lists[plate_id].append(seed_tile)
+            unassigned_tiles.remove(seed_tile)
+
+        # Create a min-heap based on noise values for frontier tiles
+        in_heap = set()
+        frontier_heap = []
+        for plate_id in range(num_plates):
+            for tile in plate_lists[plate_id]:
+                for neighbor in tile.neighbors:
+                    if neighbor in unassigned_tiles:
+                        heapq.heappush(frontier_heap, (noise_values[neighbor], neighbor))
+                        in_heap.add(neighbor)
+
+        while len(unassigned_tiles) > 0:
+            current_tile = heapq.heappop(frontier_heap)[1]
+            # Find assigned neighbor(s)
+            assigned_neighbors = [n for n in current_tile.neighbors if n not in unassigned_tiles]
+            
+            # Randomly select one assigned neighbor to determine plate assignment
+            chosen_neighbor = random.choice(assigned_neighbors)
+            current_tile.plate_id = chosen_neighbor.plate_id
+            plate_lists[chosen_neighbor.plate_id].append(current_tile)
+            unassigned_tiles.remove(current_tile)
+
+            # Add new frontier tiles
+            for neighbor in current_tile.neighbors:
+                if neighbor in unassigned_tiles and neighbor not in in_heap:
+                    heapq.heappush(frontier_heap, (noise_values[neighbor], neighbor))
+                    in_heap.add(neighbor)
+
+        # Finally, create the plate objects from the tile assignments
+        self.tectonic_plates = []
+        for plate_id in range(num_plates):
+            plate = TectonicPlate(plate_id, plate_lists[plate_id])
+            self.tectonic_plates.append(plate)
+
     def create_plate_boundaries(self):
         """
         Identify plate boundaries and create PlateBoundary objects.
@@ -507,7 +675,6 @@ class SimulatedGlobe:
         """
         for boundary in self.plate_boundaries:
             boundary.simulate_tectonic_activity()
-
 
     """
     Tile coloring
@@ -1028,6 +1195,15 @@ class SimulatedGlobe:
         random_hex = random.choice(self.world_tiles)
         random_hex.height += height_increase
 
+    def print_world_edge_and_vertex_statistics(self):
+        """
+        Print statistics about the edges and vertices of the world tiles.
+        """
+        print(f"Total world_edges: {len(self.world_edges)}")
+        print(f"Total unique vertices in the world: {len(self.world_vertices)}")
+        for vertex in self.world_vertices:
+            assert len(vertex.adjacent_tiles) == 3, "Each vertex should be adjacent to exactly 3 tiles."
+            assert len(vertex.neighboring_vertices) == 3, "Each vertex should be adjacent to exactly 3 vertices."
 
 class TectonicPlate:
     """
@@ -1426,12 +1602,10 @@ class PlateBoundary:
                     queue.append((neighbor, distance + 1)) # distance here does not have to be the true distance, we use the number of hops for simplicity
                     visited_tiles.add(neighbor)
 
-    
 class WorldTile:
     """
     Represents a tile on the sphere (hexagon or pentagon).
     """
-
 
     """
     Standard functions
@@ -1445,6 +1619,9 @@ class WorldTile:
         self.equirectangular_coords = None  # List of (lon, lat) tuples for 2D mapping, assigned later
         self.neighbors = []  # List of neighboring WorldTiles
         self.plate_id = None  # Assigned later for tectonic plates
+
+        self.world_vertices = set()  # Set of WorldVertex objects corresponding to the vertices of this tile
+        self.world_edges = set()  # Set of WorldEdge objects corresponding to the edges of this tile
 
     def __repr__(self):
         return f"WorldTile(center={self.center}, num_vertices={len(self.vertices)}, height={self.height}, plate_id={self.plate_id})"
@@ -1461,6 +1638,46 @@ class WorldTile:
     def __hash__(self):
         return hash(self.id)
 
+class WorldVertex:
+    """
+    Represents a vertex in 3D space.
+    """
+    def __init__(self, id, position):
+        self.id = id # Unique identifier (to avoid issues with floating point precision)
+        self.position = position  # 3D coordinates [x, y, z]
+        self.adjacent_tiles = []  # List of WorldTiles that share this vertex (should only ever be 3)
+        self.neighboring_vertices = []  # List of WorldVertex objects that are directly connected via edges
+
+    def __repr__(self):
+        return f"WorldVertex(id={self.id}, position={self.position})"
+    
+    def __eq__(self, value):
+        if not isinstance(value, WorldVertex):
+            return False
+        return self.id == value.id
+    
+    def __hash__(self):
+        return hash(self.id)
+    
+class WorldEdge:
+    """
+    Represents an edge between two vertices.
+    """
+    def __init__(self, vertex1, vertex2):
+        self.vertex1 = vertex1  # WorldVertex object
+        self.vertex2 = vertex2  # WorldVertex object
+        self.adjacent_tiles = []  # List of WorldTiles that share this edge (should only ever be 2)
+
+    def __repr__(self):
+        return f"WorldEdge(vertex1={self.vertex1}, vertex2={self.vertex2})"
+    
+    def __eq__(self, value):
+        if not isinstance(value, WorldEdge):
+            return False
+        return (self.vertex1 == value.vertex1 and self.vertex2 == value.vertex2) or (self.vertex1 == value.vertex2 and self.vertex2 == value.vertex1)
+    
+    def __hash__(self):
+        return hash((min(hash(self.vertex1), hash(self.vertex2)), max(hash(self.vertex1), hash(self.vertex2))))
 
 """
 Main execution
@@ -1468,9 +1685,21 @@ Main execution
 def main():
     print("Creating simulated globe...")
     start_time = time.time()
-    globe = SimulatedGlobe(recursion_level=GLOBE_RECURSION_LEVEL, use_cache=True)
+    globe = SimulatedGlobe(recursion_level=GLOBE_RECURSION_LEVEL, use_cache=False)
     end_time = time.time()
     print(f"Globe creation took {end_time - start_time:.2f} seconds.")
+
+    print("Printing geometry statistics...")
+    start_time = time.time()
+    globe.print_geometry_statistics()
+    end_time = time.time()
+    print(f"Geometry statistics printing took {end_time - start_time:.2f} seconds.")
+
+    print("Printing world edge and vertex statistics...")
+    start_time = time.time()
+    globe.print_world_edge_and_vertex_statistics()
+    end_time = time.time()
+    print(f"World edge and vertex statistics printing took {end_time - start_time:.2f} seconds.")
 
     print("Populating neighbor lists...")
     start_time = time.time()
@@ -1480,7 +1709,7 @@ def main():
 
     print("Assigning tectonic plates...")
     start_time = time.time()
-    globe.create_tectonic_plates(num_plates=NUM_TECTONIC_PLATES)
+    globe.create_tectonic_plates_using_random_growth(num_plates=NUM_TECTONIC_PLATES)
     end_time = time.time()
     print(f"Tectonic plate assignment took {end_time - start_time:.2f} seconds.")
 
@@ -1532,11 +1761,11 @@ def main():
     end_time = time.time()
     print(f"Height-based color assignment took {end_time - start_time:.2f} seconds.")
 
-    print("Filling in seas...")
-    start_time = time.time()
-    globe.fill_in_sea()
-    end_time = time.time()
-    print(f"Sea filling took {end_time - start_time:.2f} seconds.")
+    # print("Filling in seas...")
+    # start_time = time.time()
+    # globe.fill_in_sea()
+    # end_time = time.time()
+    # print(f"Sea filling took {end_time - start_time:.2f} seconds.")
 
     print("Plotting with VisPy...")
     start_time = time.time()
