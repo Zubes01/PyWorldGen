@@ -1,6 +1,6 @@
 # PyWorldGen
 
-![demo](./demo.gif)
+![demo](./assets/plate_tectonics_demo.gif)
 
 My fantasy world generator I built using python. Work in progress!
 
@@ -13,6 +13,8 @@ My fantasy world generator I built using python. Work in progress!
     - Caching to avoid recomputation
 - OpenSimplex based terrain generation for tile-based spherical worlds
     - Configurable scale and number of octaves
+- Tectonic plate generation, collision classification, and terrain deformation
+    - Real looking mountain ranges, mid-ocean trenches, and volcanic arcs
 - Plot your world map as an equirectangular Projection
 - Render your generated worlds with vispy
     - Interactive
@@ -22,5 +24,7 @@ My fantasy world generator I built using python. Work in progress!
 
 ### Coming soon:
 
-- Plate tectonics based world generation
 - Metal accelerated Goldberg polyhedra generation using PyTorch
+- Improved plate generation techniques
+- Better modeled plate collisions (with ridges and arcs offset from plate boundaries)
+- General refactoring and optimization improvements

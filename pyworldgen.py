@@ -1685,7 +1685,7 @@ Main execution
 def main():
     print("Creating simulated globe...")
     start_time = time.time()
-    globe = SimulatedGlobe(recursion_level=GLOBE_RECURSION_LEVEL, use_cache=False)
+    globe = SimulatedGlobe(recursion_level=GLOBE_RECURSION_LEVEL, use_cache=True)
     end_time = time.time()
     print(f"Globe creation took {end_time - start_time:.2f} seconds.")
 
